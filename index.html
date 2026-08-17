@@ -1865,5 +1865,128 @@ renderFree();
 })();
 </script>
 
+<!-- ===== ПАТЧ: календарь-счёт для оплаты на месяц ===== -->
+<script>
+(function(){
+var st=document.createElement('style');
+st.textContent='.inv-day{background:rgba(34,211,238,.22);border:1px solid rgba(34,211,238,.55);color:#67e8f9}'+
+'body[data-theme=light] .inv-day{background:rgba(8,145,178,.15);color:#0e7490}'+
+'.inv-total{margin-top:16px;font-size:1.45rem;font-weight:800;text-align:center}'+
+'.inv-count{margin-top:10px;text-align:center;font-weight:700;color:var(--muted)}';
+document.head.appendChild(st);
+
+/* кнопка в шапке раздела Оплата */
+var payHead=document.querySelector('#sec-pay .sec-head');
+if(payHead&&!document.getElementById('invBtn')){
+  var b=document.createElement('button');
+  b.id='invBtn';b.className='btn ghost';b.textContent='📮 Календарь для оплаты';
+  b.onclick=function(){openInvoice(null)};
+  payHead.appendChild(b);
+}
+
+/* кнопки на карточках учеников */
+if(window.renderStudents){
+  var origRS=window.renderStudents;
+  window.renderStudents=function(){
+    origRS();
+    var cards=document.querySelectorAll('#studentsList .item');
+    for(var i=0;i<cards.length;i++){
+      var s=state.students[i];if(!s)continue;
+      (function(card,sid){
+        var bb=document.createElement('button');
+        bb.className='btn ghost sm';bb.style.cssText='margin-top:12px;width:100%';
+        bb.textContent='📮 Календарь для оплаты';
+        bb.onclick=function(ev){ev.stopPropagation();openInvoice(sid);};
+        card.appendChild(bb);
+      })(cards[i],s.id);
+    }
+  };
+}
+
+/* уроки ученика в месяце (по расписанию, включая разовые и переносы) */
+function monthLessons(id,y,m){
+  var res=[];var d=new Date(y,m,1);var last=new Date(y,m+1,0);
+  while(d<=last){
+    var ds=iso(d);
+    var ls=state.lessons.filter(function(l){return l.studentId===id});
+    for(var i=0;i<ls.length;i++){
+      var l=ls[i];
+      var reg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+      if(reg||(l.overrides||[]).includes(ds)){res.push(ds);break;}
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return res;
+}
+function lastPrice(id){
+  var ps=state.payments.filter(function(p){return p.studentId===id}).sort(function(a,b){return a.date.localeCompare(b.date)});
+  return ps.length?+ps[ps.length-1].price:0;
+}
+
+var invY,invM,invStudent;
+function openInvoice(id){
+  invStudent=id||(state.students[0]||{}).id;
+  if(!invStudent)return;
+  var now=new Date();invY=now.getFullYear();invM=now.getMonth();
+  renderInvoice();openModal('mInvoice');
+}
+window.openInvoice=openInvoice;
+function invShift(dir){invM+=dir;if(invM<0){invM=11;invY--}if(invM>11){invM=0;invY++}renderInvoice();}
+window.invShift=invShift;
+function renderInvoice(){
+  var s=state.students.find(function(x){return x.id===invStudent});
+  if(!s)return;
+  var sel=document.getElementById('invStudent');
+  sel.innerHTML=state.students.map(function(x){return '<option value="'+x.id+'">'+(x.emoji?x.emoji+' ':'')+esc(x.name)+'</option>'}).join('');
+  sel.value=invStudent;
+  document.getElementById('invTitle').textContent='📮 '+(s.emoji?s.emoji+' ':'')+s.name;
+  document.getElementById('invMonth').textContent=MONTHS[invM]+' '+invY;
+  var days=monthLessons(invStudent,invY,invM);
+  var set={};days.forEach(function(ds){set[ds]=1});
+  var weeks=weeksOfMonth(invY,invM);
+  var html='<div class="pc-grid">'+DOW.map(function(w){return '<div class="pc-dow">'+w+'</div>'}).join('');
+  weeks.forEach(function(wk){wk.forEach(function(d){
+    var out=d.getMonth()!==invM?' pc-out':'';
+    var cls=set[iso(d)]?' inv-day':'';
+    html+='<div class="pc-d'+out+cls+'">'+d.getDate()+'</div>';
+  })});
+  html+='</div>';
+  document.getElementById('invBody').innerHTML=html;
+  document.getElementById('invCount').textContent='Уроков в месяце по расписанию: '+days.length;
+  var pi=document.getElementById('invPrice');
+  var lp=lastPrice(invStudent);
+  if(+pi.value!==lp)pi.value=lp||'';
+  updateInvTotal();
+}
+function updateInvTotal(){
+  var days=monthLessons(invStudent,invY,invM).length;
+  var price=+document.getElementById('invPrice').value||0;
+  document.getElementById('invTotal').textContent=days+' уроков × '+price.toLocaleString('ru-RU')+' ₽ = '+(days*price).toLocaleString('ru-RU')+' ₽';
+}
+window.updateInvTotal=updateInvTotal;
+
+/* модалка */
+var w=document.createElement('div');
+w.innerHTML='<div class="overlay" id="mInvoice" onclick="if(event.target===this)closeModal(\'mInvoice\')">'+
+ '<div class="modal" style="max-width:480px">'+
+ '<h3 id="invTitle"></h3>'+
+ '<label>Ученик</label><select id="invStudent"></select>'+
+ '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">'+
+ '<button class="btn ghost sm" onclick="invShift(-1)">◀</button>'+
+ '<b id="invMonth" style="font-size:1.2rem"></b>'+
+ '<button class="btn ghost sm" onclick="invShift(1)">▶</button></div>'+
+ '<div id="invBody"></div>'+
+ '<div class="inv-count" id="invCount"></div>'+
+ '<label>Стоимость одного занятия (₽)</label><input type="number" id="invPrice" min="0" oninput="updateInvTotal()">'+
+ '<div class="inv-total" id="invTotal"></div>'+
+ '<p class="hint">📸 Скриньте этот экран и отправляйте родителям — видны дни занятий и сумма за месяц.</p>'+
+ '</div></div>';
+document.body.appendChild(w);
+document.getElementById('invStudent').addEventListener('change',function(){invStudent=this.value;renderInvoice();});
+
+try{renderAll();}catch(e){}
+})();
+</script>
+  
 </body>
 </html>
