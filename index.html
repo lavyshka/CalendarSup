@@ -1380,5 +1380,490 @@ if(session&&session.access_token){
   if(session&&session.access_token)startSync();else renderAuth();
 }else renderAuth();
 </script>
+
+<!-- ===== ПАТЧ: умный остаток по датам + полные карточки учеников ===== -->
+<script>
+(function(){
+  // Баланс ученика НА ДАТУ урока (включая этот день)
+  function balanceOnDate(id,ds){
+    var paid=state.payments.filter(function(p){return p.studentId===id})
+      .reduce(function(s,p){return s+(+p.count||0)},0);
+    var to=fromISO(ds);
+    var today=new Date();today.setHours(0,0,0,0);
+    var firstPay=null;
+    state.payments.filter(function(p){return p.studentId===id}).forEach(function(p){
+      var d=fromISO(p.date);if(!firstPay||d<firstPay)firstPay=d;
+    });
+    var spent=0;
+    state.lessons.filter(function(l){return l.studentId===id}).forEach(function(l){
+      var from;
+      if(l.startDate)from=fromISO(l.startDate);
+      else if(firstPay)from=firstPay;
+      else{from=new Date(today);from.setDate(from.getDate()-30);}
+      if(from>to)return;
+      spent+=occCount(l,from,to);
+    });
+    return paid-spent;
+  }
+  // Дата первого НЕоплаченного урока в будущем
+  function nextUnpaidDate(id){
+    var bal=Math.max(0,studentBalance(id));
+    var today=new Date();today.setHours(0,0,0,0);
+    var end=new Date(today);end.setDate(end.getDate()+120);
+    var dates=[];var d=new Date(today);
+    while(d<=end){
+      var ds=iso(d);
+      state.lessons.filter(function(l){return l.studentId===id}).forEach(function(l){
+        var reg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+        if(reg||(l.overrides||[]).includes(ds))dates.push(ds);
+      });
+      d.setDate(d.getDate()+1);
+    }
+    dates.sort();
+    return dates[bal]||null;
+  }
+
+  // НОВЫЙ чип урока: остаток на дату урока + день оплаты
+  window.chip=function(l,ds){
+    var st=state.students.find(function(s){return s.id===l.studentId});
+    var bal=st?balanceOnDate(st.id,ds):0;
+    var mk=mark(l.id,ds);
+    var ico=mk==='done'?'✅ ':mk==='missed'?'❌ ':'';
+    var grace=isGrace();
+    var payCls,payTxt,ring=false;
+    if(bal>0){payCls='ok';payTxt='✓ Оплачено · ост. '+bal;}
+    else if(bal===0){payCls='no';payTxt='⚡ последний оплаченный';}
+    else{payCls='no';ring=!grace;payTxt=grace?'⏳ Ждёт оплаты до 10 числа':'⚠ Нужна оплата к '+fmtS(fromISO(ds));}
+    return '<div class="chip '+(mk||'')+(ring?' unpaid':'')+'" draggable="true"'+
+      ' ondragstart="dragStart(event,'+l.id+',\''+ds+'\')"'+
+      ' onclick="openCtx(event,'+l.id+',\''+ds+'\')" oncontextmenu="openCtx(event,'+l.id+',\''+ds+'\');return false"'+
+      (st?' onmouseenter="showTip(event,\''+st.id+'\')" onmousemove="moveTip(event)" onmouseleave="hideTip()"':'')+
+      ' style="border-left-color:'+(st?st.color:'#8b7cf8')+'">'+
+      '<div class="chip-time">'+ico+l.start+'–'+l.end+'</div>'+
+      '<div class="chip-name">'+(st?(st.emoji?st.emoji+' ':'')+esc(st.name):esc(l.studentId))+'</div>'+
+      '<div class="chip-pay '+payCls+'">'+payTxt+'</div></div>';
+  };
+
+  // НОВЫЕ карточки учеников: вся инфа + кликабельные ссылки
+  function link(url,txt){
+    if(!url)return'';
+    var href=url.indexOf('http')===0?url:'https://'+url;
+    return '<a href="'+href+'" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:var(--acc2);text-decoration:underline">'+txt+'</a>';
+  }
+  window.renderStudents=function(){
+    document.getElementById('studentsList').innerHTML=state.students.map(function(s){
+      var bal=studentBalance(s.id);
+      var due=nextUnpaidDate(s.id);
+      return '<div class="item" style="cursor:pointer" onclick="openStudentModal(\''+s.id+'\')">'+
+        '<div style="font-size:2.2rem">'+(s.emoji||'🎓')+'</div>'+
+        '<h3><span class="dot" style="background:'+s.color+'"></span>'+esc(s.name)+'</h3>'+
+        '<div class="muted">'+esc(s.grade||'—')+' · '+esc(s.level||'—')+'</div>'+
+        (s.textbook?'<div class="muted">📘 '+esc(s.textbook)+'</div>':'')+
+        (s.hobbies?'<div class="muted">💛 '+esc(s.hobbies)+'</div>':'')+
+        '<div style="margin-top:12px"><span class="badge '+(bal>1?'done':bal>0?'plan':'no')+'">Остаток: '+bal+' зан.</span>'+
+        (bal<=1&&due?' <span class="badge no">💳 оплата к '+fmtS(fromISO(due))+'</span>':'')+'</div>'+
+        (s.contacts?'<div class="muted" style="margin-top:10px">📞 '+esc(s.contacts)+'</div>':'')+
+        ((s.holst||s.telemost)?'<div class="muted" style="margin-top:8px">'+link(s.holst,'🖼 Holst (доска)')+(s.holst&&s.telemost?' · ':'')+link(s.telemost,'🎥 Telemost')+'</div>':'')+
+        '</div>';
+    }).join('')||emptyBox('👥','Пока нет учеников — добавьте первого!');
+  };
+
+  // Дашборд: дата оплаты в блоке "Пора принять оплату"
+  if(window.renderDash){
+    var origDash=window.renderDash;
+    window.renderDash=function(){
+      origDash();
+      var box=document.getElementById('dashLow');if(!box)return;
+      var low=state.students.map(function(s){return{s:s,bal:studentBalance(s.id)}})
+        .filter(function(x){return x.bal<=1}).sort(function(a,b){return a.bal-b.bal});
+      var grace=isGrace();
+      box.innerHTML=low.length
+        ?(grace?'<div style="padding:12px 16px;border-radius:14px;background:rgba(34,211,238,.12);border:1px solid rgba(34,211,238,.3);margin-bottom:14px;font-weight:700;font-size:.94rem">📅 Грейс-период: родители могут оплатить до 10 числа.</div>':'')+
+          '<div class="dash-cols">'+low.map(function(x){
+            var due=nextUnpaidDate(x.s.id);
+            return '<div class="rowline"><span>'+(x.s.emoji||'')+' '+esc(x.s.name)+'</span><span class="badge '+(x.bal>0?'plan':'no')+'">'+x.bal+' зан.'+(due?' · 💳 к '+fmtS(fromISO(due)):'')+'</span></div>';
+          }).join('')+'</div>'
+        :emptyBox('💳','У всех учеников достаточный баланс');
+    };
+  }
+
+  try{renderAll();}catch(e){}
+})();
+</script>
+
+<!-- ===== ПАТЧ: статистика доходов, расходы и персональный календарик ===== -->
+<script>
+(function(){
+state.expenses=state.expenses||[];
+
+var st=document.createElement('style');
+st.textContent='.pc-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:14px}'+
+'.pc-dow{text-align:center;font-weight:800;color:var(--muted);font-size:.85rem;padding:4px 0}'+
+'.pc-d{text-align:center;padding:10px 0;border-radius:10px;font-weight:700;font-size:1.05rem}'+
+'.pc-out{opacity:.35}'+
+'.pc-paid{background:#8ef0a5;color:#0a3a1a}'+
+'.pc-fut{background:#dff5d9;color:#226633}'+
+'.pc-unpaid{background:#ffd7dc;color:#8a2733}'+
+'.pc-sum{margin-top:18px;font-size:1.5rem;font-weight:800;text-align:center}'+
+'.pc-until{margin-top:6px;text-align:center;color:var(--muted);font-weight:700}'+
+'.pc-legend{display:flex;gap:14px;justify-content:center;margin-top:12px;font-size:.8rem;color:var(--muted);font-weight:700;flex-wrap:wrap}'+
+'.stat-row{display:flex;justify-content:space-between;gap:10px;padding:10px 4px;border-bottom:1px solid var(--brd);font-size:.97rem;font-weight:600;flex-wrap:wrap}'+
+'.stat-row:last-child{border-bottom:none}';
+document.head.appendChild(st);
+
+var secPay=document.getElementById('sec-pay');
+if(secPay&&!document.getElementById('payStats')){
+  var payList=document.getElementById('payList');
+  var stats=document.createElement('div');stats.id='payStats';
+  var exps=document.createElement('div');exps.id='payExpenses';
+  secPay.insertBefore(stats,payList);
+  secPay.insertBefore(exps,payList);
+}
+
+/* какие уроки оплачены */
+function occInfo(id,d){
+  var ds=iso(d);
+  var ls=state.lessons.filter(function(l){return l.studentId===id});
+  for(var i=0;i<ls.length;i++){
+    var l=ls[i];
+    var reg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+    if(reg||(l.overrides||[]).includes(ds))return{l:l,missed:mark(l.id,ds)==='missed'};
+  }
+  return null;
+}
+function coverage(id){
+  var pays=state.payments.filter(function(p){return p.studentId===id}).sort(function(a,b){return a.date.localeCompare(b.date)});
+  var today=new Date();today.setHours(0,0,0,0);
+  var start=new Date(today);start.setDate(start.getDate()-180);
+  var end=new Date(today);end.setDate(end.getDate()+400);
+  var pool=0,pi=0,map={},lastPaid=null;
+  for(var d=new Date(start);d<=end;d.setDate(d.getDate()+1)){
+    var ds=iso(d);
+    while(pi<pays.length&&pays[pi].date<=ds){pool+=+pays[pi].count;pi++;}
+    var info=occInfo(id,d);
+    if(info&&!info.missed){
+      if(pool>0){map[ds]='paid';pool--;lastPaid=ds;}
+      else map[ds]='unpaid';
+    }
+  }
+  return{map:map,lastPaid:lastPaid};
+}
+
+/* персональный календарик */
+var pcY=null,pcM=null,pcPay=null;
+function openPayCal(pid){
+  var p=state.payments.find(function(x){return x.id===pid});if(!p)return;
+  pcPay=p;var d=fromISO(p.date);pcY=d.getFullYear();pcM=d.getMonth();
+  renderPayCal();openModal('mPayCal');
+}
+window.openPayCal=openPayCal;
+function pcShift(dir){pcM+=dir;if(pcM<0){pcM=11;pcY--}if(pcM>11){pcM=0;pcY++}renderPayCal();}
+window.pcShift=pcShift;
+function renderPayCal(){
+  var p=pcPay;if(!p)return;
+  var cov=coverage(p.studentId);
+  var today=new Date();today.setHours(0,0,0,0);
+  var weeks=weeksOfMonth(pcY,pcM);
+  var html='<div class="pc-grid">'+DOW.map(function(w){return '<div class="pc-dow">'+w+'</div>'}).join('');
+  weeks.forEach(function(wk){
+    wk.forEach(function(d){
+      var ds=iso(d);var out=d.getMonth()!==pcM?' pc-out':'';
+      var info=occInfo(p.studentId,d);
+      var cls='';
+      if(info){cls=cov.map[ds]==='paid'?(d<today?' pc-paid':' pc-fut'):(cov.map[ds]==='unpaid'?' pc-unpaid':'');}
+      html+='<div class="pc-d'+out+cls+'">'+d.getDate()+'</div>';
+    });
+  });
+  html+='</div>';
+  document.getElementById('pcTitle').textContent='📅 '+(state.students.find(function(s){return s.id===p.studentId})||{name:''}).name;
+  document.getElementById('pcMonth').textContent=MONTHS[pcM]+' '+pcY;
+  document.getElementById('pcBody').innerHTML=html;
+  document.getElementById('pcSum').textContent=p.count+' уроков = '+(p.count*p.price).toLocaleString('ru-RU')+' ₽';
+  document.getElementById('pcUntil').textContent=cov.lastPaid?'Оплачено до '+fmt(fromISO(cov.lastPaid)):'';
+}
+
+/* расходы */
+function openExpense(){
+  document.getElementById('expName').value='';
+  document.getElementById('expAmount').value='';
+  document.getElementById('expDate').value=iso(new Date());
+  openModal('mExpense');
+}
+window.openExpense=openExpense;
+function saveExpense(){
+  var n=document.getElementById('expName').value.trim();
+  var a=+document.getElementById('expAmount').value;
+  var d=document.getElementById('expDate').value||iso(new Date());
+  if(!n||!a)return;
+  state.expenses.push({id:Date.now(),name:n,amount:a,date:d});
+  save();renderAll();closeModal('mExpense');toast('✓ Расход добавлен');
+}
+window.saveExpense=saveExpense;
+
+/* новая вкладка Оплата: статистика + расходы + карточки с календариком */
+window.renderPayments=function(){
+  var keys={};
+  state.payments.forEach(function(p){var d=fromISO(p.date);keys[d.getFullYear()+'-'+d.getMonth()]=1});
+  state.expenses.forEach(function(e){var d=fromISO(e.date);keys[d.getFullYear()+'-'+d.getMonth()]=1});
+  var now=new Date();keys[now.getFullYear()+'-'+now.getMonth()]=1;
+  var months=Object.keys(keys).sort().reverse().slice(0,8);
+  var totalIn=0,totalOut=0;
+  var rows=months.map(function(k){
+    var y=+k.split('-')[0],m=+k.split('-')[1];
+    var inc=state.payments.filter(function(p){var d=fromISO(p.date);return d.getFullYear()===y&&d.getMonth()===m}).reduce(function(s,p){return s+p.count*p.price},0);
+    var out=state.expenses.filter(function(e){var d=fromISO(e.date);return d.getFullYear()===y&&d.getMonth()===m}).reduce(function(s,e){return s+ +e.amount},0);
+    totalIn+=inc;totalOut+=out;
+    return '<div class="stat-row"><span><b>'+MONTHS[m]+' '+y+'</b></span><span style="color:var(--ok)">+'+inc.toLocaleString('ru-RU')+' ₽</span><span style="color:var(--warn)">−'+out.toLocaleString('ru-RU')+' ₽</span><span style="font-weight:800">='+(inc-out).toLocaleString('ru-RU')+' ₽</span></div>';
+  }).join('');
+  document.getElementById('payStats').innerHTML=
+    '<div class="sec-head" style="margin-top:26px"><h2>📊 Статистика по месяцам</h2>'+
+    '<button class="btn primary" onclick="openExpense()">+ Добавить расход</button></div>'+
+    '<div class="item" style="cursor:default">'+rows+
+    '<div class="stat-row"><span><b>Итого</b></span><span style="color:var(--ok)">+'+totalIn.toLocaleString('ru-RU')+' ₽</span><span style="color:var(--warn)">−'+totalOut.toLocaleString('ru-RU')+' ₽</span><span style="font-weight:800">='+(totalIn-totalOut).toLocaleString('ru-RU')+' ₽</span></div></div>'+
+    '<p class="hint">💡 Нажмите на карточку оплаты — откроется персональный календарь занятий (удобно показывать родителям).</p>';
+  document.getElementById('payExpenses').innerHTML=state.expenses.length?
+    '<h3 style="margin:20px 0 12px">🧾 Расходы на сервисы и подписки</h3><div class="grid-cards">'+
+    state.expenses.slice().reverse().map(function(e){
+      return '<div class="item"><button class="del" onclick="delItem(\'expenses\','+e.id+')">✖</button>'+
+        '<h3>'+esc(e.name)+'</h3><div class="muted">'+fmt(fromISO(e.date))+'</div>'+
+        '<div style="font-size:1.3rem;font-weight:800;margin-top:8px;color:var(--warn)">−'+(+e.amount).toLocaleString('ru-RU')+' ₽</div></div>';
+    }).join('')+'</div>':'';
+  document.getElementById('payList').innerHTML=state.payments.slice().reverse().map(function(p){
+    var d=fromISO(p.date);
+    return '<div class="item" style="cursor:pointer" onclick="openPayCal('+p.id+')">'+
+      '<button class="del" onclick="event.stopPropagation();delItem(\'payments\','+p.id+')">✖</button>'+
+      '<h3>'+sName(p.studentId)+'</h3>'+
+      '<div class="muted">'+p.count+' занятий × '+p.price+' ₽ · '+fmt(d)+'</div>'+
+      '<div style="font-size:1.6rem;font-weight:800;margin-top:10px">'+(p.count*p.price).toLocaleString('ru-RU')+' ₽</div>'+
+      '<div class="muted" style="margin-top:8px;font-size:.85rem">📅 Показать календарь для родителей</div></div>';
+  }).join('')||emptyBox('💳','Оплат пока нет — внесите первую!');
+};
+
+/* модалки */
+var wrap=document.createElement('div');
+wrap.innerHTML=
+'<div class="overlay" id="mPayCal" onclick="if(event.target===this)closeModal(\'mPayCal\')">'+
+ '<div class="modal" style="max-width:480px">'+
+  '<h3 id="pcTitle"></h3>'+
+  '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">'+
+   '<button class="btn ghost sm" onclick="pcShift(-1)">◀</button>'+
+   '<b id="pcMonth" style="font-size:1.2rem"></b>'+
+   '<button class="btn ghost sm" onclick="pcShift(1)">▶</button></div>'+
+  '<div id="pcBody"></div>'+
+  '<div class="pc-legend"><span>🟩 оплачено</span><span>🟨 предстоит (оплачено)</span><span>🟥 нужна оплата</span></div>'+
+  '<div class="pc-sum" id="pcSum"></div>'+
+  '<div class="pc-until" id="pcUntil"></div>'+
+ '</div></div>'+
+'<div class="overlay" id="mExpense" onclick="if(event.target===this)closeModal(\'mExpense\')">'+
+ '<div class="modal" style="max-width:440px">'+
+  '<h3>Дополнительный расход</h3>'+
+  '<label>Название (сервис, подписка)</label><input type="text" id="expName" placeholder="Holst Pro, Zoom...">'+
+  '<label>Сумма (₽)</label><input type="number" id="expAmount" min="0">'+
+  '<label>Дата</label><input type="date" id="expDate">'+
+  '<div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'mExpense\')">Отмена</button>'+
+  '<button class="btn primary" onclick="saveExpense()">Сохранить</button></div>'+
+ '</div></div>';
+document.body.appendChild(wrap);
+
+try{renderAll();}catch(e){}
+})();
+</script>
+
+<!-- ===== ФИКС: кнопка сохранения расхода ===== -->
+<script>
+(function(){
+  function bind(){
+    var m=document.getElementById('mExpense');
+    if(!m)return;
+    var b=m.querySelector('.btn.primary');
+    if(!b||b.dataset.fixed)return;
+    b.dataset.fixed='1';
+    b.removeAttribute('onclick');
+    b.addEventListener('click',function(){
+      try{
+        var n=document.getElementById('expName').value.trim();
+        var a=+document.getElementById('expAmount').value;
+        var d=document.getElementById('expDate').value||iso(new Date());
+        if(!n||!a){toast('⚠️ Заполните название и сумму');return;}
+        state.expenses=state.expenses||[];
+        state.expenses.push({id:Date.now(),name:n,amount:a,date:d});
+        save();
+        try{renderAll();}catch(e){toast('⚠️ render: '+e.message);}
+        closeModal('mExpense');
+        toast('✓ Расход добавлен');
+      }catch(e){toast('Ошибка: '+e.message);}
+    });
+  }
+  bind();
+  window.addEventListener('load',bind);
+})();
+</script>
+
+<!-- ===== ПАТЧ: раздел «Свободное время» ===== -->
+<script>
+(function(){
+var st=document.createElement('style');
+st.textContent='.free-day{min-height:150px}'+
+'.free-slot{background:rgba(52,211,153,.15);border:1px solid rgba(52,211,153,.45);color:#6ee7b7;border-radius:12px;padding:9px 10px;font-weight:800;font-size:.95rem;text-align:center}'+
+'body[data-theme=light] .free-slot{background:rgba(52,211,153,.18);color:#047857}';
+document.head.appendChild(st);
+
+if(!document.getElementById('sec-free')){
+  var sec=document.createElement('section');
+  sec.id='sec-free';sec.className='card';
+  sec.innerHTML='<div class="sec-head"><h2>🕐 Свободное время</h2>'+
+   '<div class="cal-controls" style="margin:0">'+
+   '<button class="btn ghost" onclick="freeShift(-1)">◀ Назад</button>'+
+   '<b id="freeRange" style="min-width:150px;text-align:center"></b>'+
+   '<button class="btn ghost" onclick="freeShift(1)">Вперед ▶</button>'+
+   '<select id="freeMin" class="sm-sel"><option value="30">Окна от 30 мин</option><option value="45" selected>Окна от 45 мин</option><option value="60">Окна от 60 мин</option><option value="90">Окна от 90 мин</option></select>'+
+   '</div></div>'+
+   '<p class="hint">💡 Свободные окна с 9:00 до 22:00, не занятые уроками. Можно сделать скрин и предложить слоты новым ученикам.</p>'+
+   '<div class="cal-scroll"><div id="freeArea"></div></div>';
+  document.querySelector('main').appendChild(sec);
+}
+
+var tab=document.createElement('button');
+tab.className='tab';tab.dataset.sec='sec-free';tab.textContent='🕐 Свободное время';
+tab.onclick=function(){document.getElementById('searchInput').value='';state.ui.q='';showTab('sec-free');};
+var mood=document.querySelector('[data-sec="sec-mood"]');
+if(mood)mood.parentNode.insertBefore(tab,mood);else document.querySelector('.tabs').appendChild(tab);
+
+var freeMonday=(function(){var d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-dayNum(d));return d})();
+var freeMin=45;
+window.freeShift=function(dir){freeMonday.setDate(freeMonday.getDate()+7*dir);renderFree();};
+document.getElementById('freeMin').addEventListener('change',function(){freeMin=+this.value;renderFree();});
+
+function fmtMin(t){return Math.floor(t/60)+':'+pad(t%60)}
+function freeSlots(d){
+  var ls=lessonsOn(d,true);
+  var cur=540,endDay=1320,slots=[];
+  ls.forEach(function(o){
+    var p=o.l.start.split(':').map(Number),q=o.l.end.split(':').map(Number);
+    var s=p[0]*60+p[1],e=q[0]*60+q[1];
+    if(s>cur)slots.push([cur,Math.min(s,endDay)]);
+    cur=Math.max(cur,e);
+  });
+  if(cur<endDay)slots.push([cur,endDay]);
+  return slots.filter(function(x){return x[1]-x[0]>=freeMin});
+}
+function renderFree(){
+  var area=document.getElementById('freeArea');if(!area)return;
+  var t0=new Date();t0.setHours(0,0,0,0);
+  var html='<div class="cal-grid">';
+  for(var i=0;i<7;i++){
+    var d=new Date(freeMonday);d.setDate(d.getDate()+i);
+    var cls='cal-day free-day';
+    if(iso(d)===iso(new Date()))cls+=' today';
+    if(d<t0)cls+=' out';
+    var slots=freeSlots(d);
+    html+='<div class="'+cls+'"><div class="cd-head"><b>'+DOW[i]+'</b><span>'+fmtS(d)+'</span></div>';
+    html+=slots.length?slots.map(function(s){return '<div class="free-slot">'+fmtMin(s[0])+'–'+fmtMin(s[1])+'</div>'}).join('')
+      :'<div class="muted" style="text-align:center;margin-top:14px">Нет свободного времени</div>';
+    html+='</div>';
+  }
+  html+='</div>';
+  area.innerHTML=html;
+  var end=new Date(freeMonday);end.setDate(end.getDate()+6);
+  document.getElementById('freeRange').textContent=fmtS(freeMonday)+' — '+fmtS(end);
+}
+window.renderFree=renderFree;
+
+if(window.renderAll){var origRA=window.renderAll;window.renderAll=function(){origRA();renderFree();};}
+renderFree();
+})();
+</script>
+
+<!-- ===== ПАТЧ: разовые уроки (только одна дата) ===== -->
+<script>
+(function(){
+  // галочка в модалке урока
+  var modal=document.getElementById('mLesson');
+  if(modal&&!document.getElementById('lessonOneOff')){
+    var box=document.createElement('div');
+    box.innerHTML='<label class="radio-opt" style="margin-top:14px"><input type="checkbox" id="lessonOneOff">'+
+      '<span><b>🎯 Разовый урок</b><small>Пройдёт только в выбранную дату — без повторов каждую неделю</small></span></label>'+
+      '<div id="oneOffBox" style="display:none"><label>Дата разового урока</label><input type="date" id="lessonOneOffDate"></div>';
+    modal.querySelector('.modal').insertBefore(box,document.getElementById('lessonErr'));
+  }
+  var cb=document.getElementById('lessonOneOff');
+  function syncOneOff(){
+    var on=cb&&cb.checked;
+    document.getElementById('oneOffBox').style.display=on?'block':'none';
+    var daySel=document.getElementById('lessonDay');
+    var sd=document.getElementById('lessonStartDate');
+    if(daySel)daySel.disabled=on;
+    if(sd)sd.disabled=on;
+    if(on&&!document.getElementById('lessonOneOffDate').value){
+      document.getElementById('lessonOneOffDate').value=iso(nextWeekday(+daySel.value||1));
+    }
+  }
+  if(cb)cb.addEventListener('change',syncOneOff);
+  document.getElementById('lessonDay').addEventListener('change',function(){
+    if(cb&&cb.checked&&!document.getElementById('lessonId').value){
+      document.getElementById('lessonOneOffDate').value=iso(nextWeekday(+this.value||1));
+    }
+  });
+
+  // открытие модалки: учитываем разовость
+  var origOpen=window.openLessonModal;
+  window.openLessonModal=function(id,prefillDay){
+    origOpen(id,prefillDay);
+    var l=id?state.lessons.find(function(x){return String(x.id)===String(id)}):null;
+    if(cb){
+      cb.checked=!!(l&&l.oneOff);
+      syncOneOff();
+      if(l&&l.oneOff)document.getElementById('lessonOneOffDate').value=l.startDate||'';
+      else if(!l)document.getElementById('lessonOneOffDate').value=iso(nextWeekday(prefillDay||+document.getElementById('lessonDay').value||1));
+    }
+  };
+
+  // сохранение: разовый = startDate и endDate одинаковые
+  window.saveLesson=function(){
+    var id=document.getElementById('lessonId').value;
+    var on=cb&&cb.checked;
+    var day=+document.getElementById('lessonDay').value;
+    var start=document.getElementById('lessonStart').value;
+    var end=document.getElementById('lessonEnd').value;
+    var studentId=document.getElementById('lessonStudent').value;
+    var err=document.getElementById('lessonErr');
+    var startDate=null,endDate=null,oneOff=false;
+    if(on){
+      var od=document.getElementById('lessonOneOffDate').value;
+      if(!od){err.textContent='⚠️ Укажите дату разового урока';err.style.display='block';return;}
+      day=dayNum(fromISO(od))+1;startDate=od;endDate=od;oneOff=true;
+      if(lessonsOn(fromISO(od),true).some(function(o){return String(o.l.id)!==id&&start<o.l.end&&end>o.l.start;})){
+        err.textContent='⚠️ Ошибка времени: интервал пересекается с другим уроком!';err.style.display='block';return;}
+    }else{
+      startDate=document.getElementById('lessonStartDate').value||null;
+      if(state.lessons.some(function(l){return String(l.id)!==id&&l.day===day&&start<l.end&&end>l.start;})){
+        err.textContent='⚠️ Ошибка времени: интервал пересекается с другим уроком!';err.style.display='block';return;}
+    }
+    if(!start||!end||!studentId){err.textContent='⚠️ Заполните все поля';err.style.display='block';return;}
+    if(start>=end){err.textContent='⚠️ Окончание должно быть позже начала';err.style.display='block';return;}
+    if(id){
+      Object.assign(state.lessons.find(function(l){return String(l.id)===id}),
+        {day:day,start:start,end:end,studentId:studentId,startDate:startDate,endDate:endDate,oneOff:oneOff});
+    }else{
+      state.lessons.push({id:Date.now(),day:day,start:start,end:end,studentId:studentId,
+        startDate:startDate,endDate:endDate,oneOff:oneOff,exceptions:[],overrides:[]});
+    }
+    save();renderAll();closeModal('mLesson');
+    toast(oneOff?'✓ Разовый урок добавлен':'✓ Урок сохранён');
+  };
+
+  // значок 🎯 на чипе разового урока
+  if(window.chip){
+    var prevChip=window.chip;
+    window.chip=function(l,ds){
+      var html=prevChip(l,ds);
+      if(l.oneOff)html=html.replace('<div class="chip-time">','<div class="chip-time">🎯 ');
+      return html;
+    };
+  }
+  try{renderAll();}catch(e){}
+})();
+</script>
+
 </body>
 </html>
