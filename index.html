@@ -1987,6 +1987,294 @@ document.getElementById('invStudent').addEventListener('change',function(){invSt
 try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ПАТЧ: ДР-календарь, ДЗ-отметки, отчёты, перенос со временем, правка событий ===== -->
+<script>
+(function(){
+var st=document.createElement('style');
+st.textContent='.bd-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;font-size:.72rem;text-align:center;margin-top:8px}'+
+'.bd-dow{color:var(--muted);font-weight:800}'+
+'.bd-day{padding:4px 0;border-radius:6px;font-weight:700}'+
+'.bd-on{background:rgba(251,191,36,.3);color:#fcd34d}'+
+'body[data-theme=light] .bd-on{background:rgba(251,191,36,.35);color:#b45309}'+
+'.chip-hw{font-size:.8rem;margin-top:4px;font-weight:800}'+
+'.rep-row{display:flex;justify-content:space-between;gap:10px;padding:10px 4px;border-bottom:1px solid var(--brd);font-weight:600;font-size:1rem}'+
+'.rep-row:last-child{border-bottom:none}';
+document.head.appendChild(st);
+
+/* ---------- 1. Улучшенный парсинг дат ДР ---------- */
+window.parseBDate=function(s){
+  s=String(s||'').trim();
+  var m=s.match(/^(\d{1,2})[.\/](\d{1,2})([.\/]\d{4})?$/);
+  if(m)return{d:+m[1],m:+m[2]-1};
+  m=s.match(/(\d{1,2})\s+([а-яёa-z]+)/i);
+  if(m){
+    var name=m[2].toLowerCase();
+    var mi=MG.indexOf(name);
+    if(mi<0)mi=['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь'].indexOf(name);
+    if(mi>=0)return{d:+m[1],m:mi};
+  }
+  return null;
+};
+
+/* ---------- календарь ДР на год во вкладке ---------- */
+window.renderBdays=function(){
+  var now=new Date(),year=now.getFullYear();
+  var list=state.birthdays.slice().reverse().map(function(b){
+    var p=parseBDate(b.date);
+    var extra='';
+    if(p){
+      var t0=new Date();t0.setHours(0,0,0,0);
+      var d=new Date(t0.getFullYear(),p.m,p.d);
+      if(d<t0)d=new Date(t0.getFullYear()+1,p.m,p.d);
+      extra=' <span class="muted">· '+fmtS(d)+' · через '+Math.round((d-t0)/864e5)+' дн.</span>';
+    }
+    return '<div class="item"><button class="del" onclick="delItem(\'birthdays\','+b.id+')">✖</button>'+
+      '<h3>🎂 '+sName(b.studentId)+'</h3>'+
+      '<div style="font-size:1.3rem;font-weight:800;margin-top:6px">'+esc(b.date)+'</div>'+
+      (b.label?'<div class="muted">'+esc(b.label)+'</div>':'')+
+      '<div style="margin-top:6px">'+extra+'</div></div>';
+  }).join('')||emptyBox('🎂','Дней рождения пока нет');
+  var cal='<div class="grid-cards">';
+  for(var m=0;m<12;m++){
+    cal+='<div class="item" style="cursor:default"><h3 style="font-size:1rem">'+MONTHS[m]+'</h3><div class="bd-grid">';
+    ['П','В','С','Ч','П','С','В'].forEach(function(w){cal+='<div class="bd-dow">'+w+'</div>'});
+    var first=new Date(year,m,1);
+    for(var i=0;i<dayNum(first);i++)cal+='<div></div>';
+    var last=new Date(year,m+1,0).getDate();
+    for(var dd=1;dd<=last;dd++){
+      var hit=state.birthdays.some(function(b){var p=parseBDate(b.date);return p&&p.d===dd&&p.m===m});
+      cal+='<div class="bd-day'+(hit?' bd-on':'')+'">'+dd+'</div>';
+    }
+    cal+='</div></div>';
+  }
+  cal+='</div>';
+  document.getElementById('bdayList').innerHTML=list+
+    '<h3 style="margin:24px 0 12px">🗓 Календарь дней рождения · '+year+'</h3>'+cal;
+};
+
+/* ---------- 2. Отметки ДЗ в меню урока ---------- */
+state.hwMarks=state.hwMarks||{};
+function setHw(v){
+  var t=ctxTarget;if(!t)return;
+  document.getElementById('ctx').classList.remove('open');
+  state.hwMarks[t.id]=state.hwMarks[t.id]||{};
+  if(state.hwMarks[t.id][t.ds]===v)delete state.hwMarks[t.id][t.ds];
+  else state.hwMarks[t.id][t.ds]=v;
+  save();renderAll();
+}
+window.setHw=setHw;
+var ctxEl=document.getElementById('ctx');
+[['📝 ДЗ: выполнено полностью','full'],['📝 ДЗ: частично','part'],['📝 ДЗ: не выполнено','none']].forEach(function(x){
+  var b=document.createElement('button');b.textContent=x[0];
+  b.onclick=function(){setHw(x[1])};
+  ctxEl.appendChild(b);
+});
+var prevChip=window.chip;
+window.chip=function(l,ds){
+  var html=prevChip(l,ds);
+  var hm=state.hwMarks&&state.hwMarks[l.id]&&state.hwMarks[l.id][ds];
+  if(hm){
+    var ico=hm==='full'?'📝✅':hm==='part'?'📝⚠️':'📝❌';
+    html=html.replace('<div class="chip-pay ','<div class="chip-hw">'+ico+'</div><div class="chip-pay ');
+  }
+  return html;
+};
+
+/* ---------- 3. Перенос с изменением времени ---------- */
+state.tOv=state.tOv||{};
+var origLO=window.lessonsOn;
+window.lessonsOn=function(date,all){
+  return origLO(date,all).map(function(o){
+    var t=state.tOv&&state.tOv[o.l.id]&&state.tOv[o.l.id][o.ds];
+    return t?{l:Object.assign({},o.l,{start:t.start,end:t.end}),ds:o.ds}:o;
+  });
+};
+document.querySelector('#mMove .modal').insertAdjacentHTML('beforeend',
+  '<div class="frow"><div><label>Новое время начала</label><input type="time" id="moveStart"></div>'+
+  '<div><label>Новое время окончания</label><input type="time" id="moveEnd"></div></div>');
+var origOM=window.openMoveModal;
+window.openMoveModal=function(id,ds){
+  origOM(id,ds);
+  var l=state.lessons.find(function(x){return x.id===id});
+  var t=state.tOv&&state.tOv[id]&&state.tOv[id][ds];
+  document.getElementById('moveStart').value=t?t.start:l.start;
+  document.getElementById('moveEnd').value=t?t.end:l.end;
+};
+window.saveMove=function(){
+  var nd=document.getElementById('moveDate').value;
+  var ns=document.getElementById('moveStart').value;
+  var ne=document.getElementById('moveEnd').value;
+  if(!nd||!moveTarget)return;
+  if(ns&&ne&&ns>=ne){toast('⚠️ Окончание должно быть позже начала');return;}
+  var id=moveTarget.id,ds=moveTarget.ds;
+  var l=state.lessons.find(function(x){return x.id===id});if(!l)return;
+  var timeChanged=ns&&ne&&(ns!==l.start||ne!==l.end);
+  if(nd===ds){
+    if(!timeChanged){closeModal('mMove');return;}
+    if(lessonsOn(fromISO(nd),true).filter(function(o){return o.l.id!==id}).some(function(o){return ns<o.l.end&&ne>o.l.start})){toast('⚠️ Конфликт времени');return;}
+    state.tOv[id]=state.tOv[id]||{};state.tOv[id][ds]={start:ns,end:ne};
+    save();renderAll();closeModal('mMove');toast('↪️ Время занятия изменено');return;
+  }
+  var es=ns||l.start,ee=ne||l.end;
+  if(lessonsOn(fromISO(nd),true).filter(function(o){return o.l.id!==id}).some(function(o){return es<o.l.end&&ee>o.l.start})){toast('⚠️ Конфликт времени на новую дату');return;}
+  if((l.overrides||[]).includes(ds))l.overrides=l.overrides.filter(function(x){return x!==ds});
+  else (l.exceptions=l.exceptions||[]).push(ds);
+  (l.overrides=l.overrides||[]).push(nd);
+  var mk=state.marks[id]&&state.marks[id][ds];if(mk){state.marks[id][nd]=mk;delete state.marks[id][ds];}
+  if(state.hwMarks&&state.hwMarks[id]&&state.hwMarks[id][ds]){state.hwMarks[id][nd]=state.hwMarks[id][ds];delete state.hwMarks[id][ds];}
+  if(timeChanged){state.tOv[id]=state.tOv[id]||{};state.tOv[id][nd]={start:ns,end:ne};if(state.tOv[id][ds])delete state.tOv[id][ds];}
+  save();renderAll();closeModal('mMove');toast('↪️ Урок перенесён на '+fmtS(fromISO(nd)));
+};
+
+/* ---------- 4. Редактирование и удаление событий ---------- */
+var origDC=window.dayCell;
+window.dayCell=function(date){
+  return origDC(date).replace('<div class="cal-day ','<div data-ds="'+iso(date)+'" class="cal-day ');
+};
+document.addEventListener('click',function(e){
+  var el=e.target.closest('.evt-chip');
+  if(!el||el.classList.contains('bday')||el.classList.contains('hwchip'))return;
+  var cell=el.closest('.cal-day');if(!cell||!cell.dataset.ds)return;
+  var chips=Array.prototype.filter.call(cell.querySelectorAll('.evt-chip'),function(c){return !c.classList.contains('bday')&&!c.classList.contains('hwchip')});
+  var idx=chips.indexOf(el);
+  var evs=eventsOn(fromISO(cell.dataset.ds));
+  if(evs[idx])openEventEdit(evs[idx].id);
+});
+document.querySelector('#mEvent .modal').insertAdjacentHTML('beforeend',
+  '<input type="hidden" id="evEditId">'+
+  '<div class="modal-actions" style="margin-top:12px"><button class="btn danger" id="evDeleteBtn" style="display:none">🗑 Удалить событие</button></div>');
+function openEventEdit(id){
+  var ev=state.events.find(function(x){return x.id===id});if(!ev)return;
+  document.getElementById('evEditId').value=id;
+  document.getElementById('evName').value=ev.name;
+  document.getElementById('evStart').value=ev.start;
+  document.getElementById('evEnd').value=ev.end||ev.start;
+  document.getElementById('evLabel').value=ev.label||'';
+  document.getElementById('evDeleteBtn').style.display='inline-block';
+  openModal('mEvent');
+}
+window.openEventEdit=openEventEdit;
+var origOEM=window.openEventModal;
+window.openEventModal=function(){origOEM();document.getElementById('evEditId').value='';document.getElementById('evDeleteBtn').style.display='none';};
+var origSE=window.saveEvent;
+window.saveEvent=function(){
+  var eid=document.getElementById('evEditId').value;
+  if(!eid){origSE();return;}
+  var ev=state.events.find(function(x){return x.id===+eid});if(!ev)return;
+  var n=document.getElementById('evName').value.trim(),s=document.getElementById('evStart').value;
+  if(!n||!s)return;
+  ev.name=n;ev.start=s;ev.end=document.getElementById('evEnd').value||s;ev.label=document.getElementById('evLabel').value||'🎉';
+  save();renderAll();closeModal('mEvent');toast('✓ Событие обновлено');
+};
+document.getElementById('evDeleteBtn').onclick=function(){
+  var eid=+document.getElementById('evEditId').value;
+  closeModal('mEvent');
+  delItem('events',eid);
+};
+
+/* ---------- 5. Вкладка «Отчёты» ---------- */
+state.repComments=state.repComments||[];
+var sec=document.createElement('section');
+sec.id='sec-reports';sec.className='card';
+sec.innerHTML='<div class="sec-head"><h2>📊 Отчёты для родителей</h2>'+
+ '<div class="cal-controls" style="margin:0">'+
+ '<button class="btn ghost" onclick="repShift(-1)">◀ Назад</button>'+
+ '<b id="repRange" style="min-width:140px;text-align:center"></b>'+
+ '<button class="btn ghost" onclick="repShift(1)">Вперед ▶</button></div></div>'+
+ '<p class="hint">💡 По каждому ученику: уроки за месяц, проведённые, статистика ДЗ и комментарий. Нажмите «📸 Отчёт» — откроется экран для скриншота родителям.</p>'+
+ '<div class="grid-cards" id="repList"></div>';
+document.querySelector('main').appendChild(sec);
+var tab=document.createElement('button');
+tab.className='tab';tab.dataset.sec='sec-reports';tab.textContent='📊 Отчёты';
+tab.onclick=function(){document.getElementById('searchInput').value='';state.ui.q='';showTab('sec-reports');};
+var mood=document.querySelector('[data-sec="sec-mood"]');
+mood.parentNode.insertBefore(tab,mood);
+
+var repY=new Date().getFullYear(),repM=new Date().getMonth();
+window.repShift=function(dir){repM+=dir;if(repM<0){repM=11;repY--}if(repM>11){repM=0;repY++}renderReports();};
+function occOf(id,d){
+  var ds=iso(d);
+  var ls=state.lessons.filter(function(l){return l.studentId===id});
+  for(var i=0;i<ls.length;i++){
+    var l=ls[i];
+    var reg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+    if(reg||(l.overrides||[]).includes(ds))return l;
+  }
+  return null;
+}
+function reportData(id,y,m){
+  var t0=iso(new Date());
+  var lessons=0,held=0,hw={full:0,part:0,none:0};
+  var d=new Date(y,m,1),last=new Date(y,m+1,0);
+  while(d<=last){
+    var ds=iso(d),l=occOf(id,d);
+    if(l){lessons++;
+      if(ds<=t0&&mark(l.id,ds)!=='missed')held++;
+      var hm=state.hwMarks&&state.hwMarks[l.id]&&state.hwMarks[l.id][ds];
+      if(hm)hw[hm]++;
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return{lessons:lessons,held:held,hw:hw};
+}
+function renderReports(){
+  document.getElementById('repRange').textContent=MONTHS[repM]+' '+repY;
+  document.getElementById('repList').innerHTML=state.students.map(function(s){
+    var r=reportData(s.id,repY,repM);
+    var cm=state.repComments.find(function(c){return c.studentId===s.id&&c.ym===repY+'-'+pad(repM+1)});
+    return '<div class="item" style="cursor:default">'+
+      '<h3>'+(s.emoji||'')+' '+esc(s.name)+'</h3>'+
+      '<div class="muted">Уроков в месяце: <b>'+r.lessons+'</b> · проведено: <b>'+r.held+'</b></div>'+
+      '<div class="muted">📝 ДЗ: полностью — <b>'+r.hw.full+'</b>, частично — <b>'+r.hw.part+'</b>, не выполнено — <b>'+r.hw.none+'</b></div>'+
+      (cm?'<div class="muted" style="margin-top:8px">💬 '+esc(cm.text)+'</div>':'')+
+      '<button class="btn primary sm" style="margin-top:14px" onclick="openReport(\''+s.id+'\')">📸 Отчёт для родителей</button></div>';
+  }).join('')||emptyBox('📊','Пока нет учеников');
+}
+window.renderReports=renderReports;
+function openReport(id){
+  var s=state.students.find(function(x){return x.id===id});if(!s)return;
+  var r=reportData(id,repY,repM);
+  var ym=repY+'-'+pad(repM+1);
+  var cm=state.repComments.find(function(c){return c.studentId===id&&c.ym===ym});
+  document.getElementById('repTitle').textContent=(s.emoji?s.emoji+' ':'')+s.name+' · '+MONTHS[repM]+' '+repY;
+  document.getElementById('repBody').innerHTML=
+    '<div class="rep-row"><span>📅 Уроков по расписанию</span><b>'+r.lessons+'</b></div>'+
+    '<div class="rep-row"><span>✅ Проведено уроков</span><b>'+r.held+'</b></div>'+
+    '<div class="rep-row"><span>📝 ДЗ выполнено полностью</span><b>'+r.hw.full+'</b></div>'+
+    '<div class="rep-row"><span>📝 ДЗ выполнено частично</span><b>'+r.hw.part+'</b></div>'+
+    '<div class="rep-row"><span>📝 ДЗ не выполнено</span><b>'+r.hw.none+'</b></div>';
+  document.getElementById('repStudentId').value=id;
+  document.getElementById('repText').value=cm?cm.text:'';
+  openModal('mReport');
+}
+window.openReport=openReport;
+function saveReport(){
+  var id=document.getElementById('repStudentId').value;
+  var text=document.getElementById('repText').value.trim();
+  var ym=repY+'-'+pad(repM+1);
+  state.repComments=state.repComments.filter(function(c){return !(c.studentId===id&&c.ym===ym)});
+  if(text)state.repComments.push({id:Date.now(),studentId:id,ym:ym,text:text});
+  save();renderAll();closeModal('mReport');toast('✓ Комментарий сохранён');
+}
+window.saveReport=saveReport;
+var wr=document.createElement('div');
+wr.innerHTML='<div class="overlay" id="mReport" onclick="if(event.target===this)closeModal(\'mReport\')">'+
+ '<div class="modal" style="max-width:480px">'+
+ '<h3 id="repTitle"></h3>'+
+ '<div id="repBody"></div>'+
+ '<label>Комментарий для родителей</label><textarea id="repText" placeholder="Старался, молодец! В следующем месяце уделим внимание..."></textarea>'+
+ '<input type="hidden" id="repStudentId">'+
+ '<div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'mReport\')">Отмена</button>'+
+ '<button class="btn primary" onclick="saveReport()">Сохранить</button></div>'+
+ '<p class="hint">📸 Скриньте это окно — готовый отчёт для родителей.</p>'+
+ '</div></div>';
+document.body.appendChild(wr);
+
+if(window.renderAll){var origRA=window.renderAll;window.renderAll=function(){origRA();renderReports();};}
+try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
