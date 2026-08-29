@@ -2275,6 +2275,134 @@ if(window.renderAll){var origRA=window.renderAll;window.renderAll=function(){ori
 try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ФИКС: перенос занятия и отчёты родителям ===== -->
+<script>
+(function(){
+/* ---------- ПЕРЕНОС: поля времени над кнопками + надёжная кнопка ---------- */
+var mModal=document.querySelector('#mMove .modal');
+if(mModal){
+  var frow=mModal.querySelector('.frow');
+  var acts=mModal.querySelector('.modal-actions');
+  if(frow&&acts)mModal.insertBefore(frow,acts);
+}
+var prevOM=window.openMoveModal;
+window.openMoveModal=function(id,ds){window.__moveId=id;window.__moveDs=ds;if(prevOM)prevOM(id,ds);};
+function doMove(){
+  try{
+    var nd=document.getElementById('moveDate').value;
+    var ns=document.getElementById('moveStart').value;
+    var ne=document.getElementById('moveEnd').value;
+    if(!nd){toast('⚠️ Укажите дату');return;}
+    if(ns&&ne&&ns>=ne){toast('⚠️ Окончание должно быть позже начала');return;}
+    var id=window.__moveId,ds=window.__moveDs;
+    if(!id||!ds){toast('⚠️ Откройте перенос заново');return;}
+    var l=state.lessons.find(function(x){return String(x.id)===String(id)});
+    if(!l){toast('⚠️ Урок не найден');return;}
+    state.tOv=state.tOv||{};
+    var tc=ns&&ne&&(ns!==l.start||ne!==l.end);
+    if(nd===ds){
+      if(!tc){closeModal('mMove');return;}
+      if(lessonsOn(fromISO(nd),true).some(function(o){return String(o.l.id)!==String(id)&&ns<o.l.end&&ne>o.l.start})){toast('⚠️ Конфликт времени');return;}
+      state.tOv[id]=state.tOv[id]||{};state.tOv[id][ds]={start:ns,end:ne};
+      save();renderAll();closeModal('mMove');toast('↪️ Время занятия изменено');return;
+    }
+    var es=ns||l.start,ee=ne||l.end;
+    if(lessonsOn(fromISO(nd),true).some(function(o){return String(o.l.id)!==String(id)&&es<o.l.end&&ee>o.l.start})){toast('⚠️ Конфликт времени на новую дату');return;}
+    if((l.overrides||[]).indexOf(ds)>=0)l.overrides=l.overrides.filter(function(x){return x!==ds});
+    else(l.exceptions=l.exceptions||[]).push(ds);
+    (l.overrides=l.overrides||[]).push(nd);
+    if(state.marks&&state.marks[id]&&state.marks[id][ds]){state.marks[id][nd]=state.marks[id][ds];delete state.marks[id][ds];}
+    if(state.hwMarks&&state.hwMarks[id]&&state.hwMarks[id][ds]){state.hwMarks[id][nd]=state.hwMarks[id][ds];delete state.hwMarks[id][ds];}
+    if(tc){state.tOv[id]=state.tOv[id]||{};state.tOv[id][nd]={start:ns,end:ne};if(state.tOv[id][ds])delete state.tOv[id][ds];}
+    save();renderAll();closeModal('mMove');toast('↪️ Урок перенесён на '+fmtS(fromISO(nd)));
+  }catch(e){toast('Ошибка переноса: '+e.message);}
+}
+var mvBtn=document.querySelector('#mMove .btn.primary');
+if(mvBtn){mvBtn.removeAttribute('onclick');mvBtn.addEventListener('click',function(e){e.preventDefault();doMove();});}
+
+/* ---------- ОТЧЁТЫ: надёжное открытие и комментарий ---------- */
+function monthOfRange(){
+  var el=document.getElementById('repRange');
+  var p=((el?el.textContent:'')||'').trim().split(/\s+/);
+  var mi=MONTHS.indexOf(p[0]);var now=new Date();
+  return{y:+p[1]||now.getFullYear(),m:mi<0?now.getMonth():mi};
+}
+function occOfL(id,d){
+  var ds=iso(d);
+  var ls=state.lessons.filter(function(l){return l.studentId===id});
+  for(var i=0;i<ls.length;i++){
+    var l=ls[i];
+    var reg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+    if(reg||(l.overrides||[]).includes(ds))return l;
+  }
+  return null;
+}
+function reportL(id,y,m){
+  var t0=iso(new Date());var lessons=0,held=0,hw={full:0,part:0,none:0};
+  var d=new Date(y,m,1),last=new Date(y,m+1,0);
+  while(d<=last){
+    var ds=iso(d),l=occOfL(id,d);
+    if(l){lessons++;
+      if(ds<=t0&&mark(l.id,ds)!=='missed')held++;
+      var hm=state.hwMarks&&state.hwMarks[l.id]&&state.hwMarks[l.id][ds];
+      if(hm)hw[hm]++;
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return{lessons:lessons,held:held,hw:hw};
+}
+function saveReportSafe(){
+  try{
+    var id=document.getElementById('repStudentId').value;
+    var text=document.getElementById('repText').value.trim();
+    var ym=window.__repYM;
+    state.repComments=state.repComments||[];
+    state.repComments=state.repComments.filter(function(c){return !(c.studentId===id&&c.ym===ym)});
+    if(text)state.repComments.push({id:Date.now(),studentId:id,ym:ym,text:text});
+    save();renderAll();closeModal('mReport');toast('✓ Комментарий сохранён');
+  }catch(e){toast('Ошибка: '+e.message);}
+}
+function openReportSafe(id){
+  try{
+    var s=state.students.find(function(x){return x.id===id});if(!s)return;
+    var mo=monthOfRange();
+    var r=reportL(id,mo.y,mo.m);
+    var ym=mo.y+'-'+pad(mo.m+1);
+    window.__repYM=ym;
+    var cm=(state.repComments||[]).find(function(c){return c.studentId===id&&c.ym===ym});
+    document.getElementById('repTitle').textContent=(s.emoji?s.emoji+' ':'')+s.name+' · '+MONTHS[mo.m]+' '+mo.y;
+    document.getElementById('repBody').innerHTML=
+      '<div class="rep-row"><span>📅 Уроков по расписанию</span><b>'+r.lessons+'</b></div>'+
+      '<div class="rep-row"><span>✅ Проведено уроков</span><b>'+r.held+'</b></div>'+
+      '<div class="rep-row"><span>📝 ДЗ полностью</span><b>'+r.hw.full+'</b></div>'+
+      '<div class="rep-row"><span>📝 ДЗ частично</span><b>'+r.hw.part+'</b></div>'+
+      '<div class="rep-row"><span>📝 ДЗ не выполнено</span><b>'+r.hw.none+'</b></div>';
+    document.getElementById('repStudentId').value=id;
+    var sb=document.querySelector('#mReport .btn.primary');
+    if(sb&&!sb.dataset.fixed){sb.dataset.fixed='1';sb.removeAttribute('onclick');sb.addEventListener('click',saveReportSafe);}
+    document.getElementById('repText').value=cm?cm.text:'';
+    openModal('mReport');
+  }catch(e){toast('Ошибка отчёта: '+e.message);}
+}
+window.openReportSafe=openReportSafe;
+
+function fixRepButtons(){
+  document.querySelectorAll('#repList button').forEach(function(b){b.removeAttribute('onclick');});
+}
+if(window.renderReports){var prevRR=window.renderReports;window.renderReports=function(){prevRR();fixRepButtons();};}
+document.addEventListener('click',function(e){
+  var b=e.target.closest('#repList .btn.primary');
+  if(!b)return;
+  var cards=document.querySelectorAll('#repList .item');
+  var card=b.closest('.item');
+  var idx=Array.prototype.indexOf.call(cards,card);
+  if(state.students[idx])openReportSafe(state.students[idx].id);
+});
+fixRepButtons();
+try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
