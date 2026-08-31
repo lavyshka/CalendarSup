@@ -2547,6 +2547,21 @@ document.addEventListener('click',function(e){
 try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ФИКС: уроки дня по порядку времени ===== -->
+<script>
+(function(){
+  var prevLO=window.lessonsOn;
+  if(prevLO){
+    window.lessonsOn=function(date,all){
+      return prevLO(date,all).slice().sort(function(a,b){
+        return (a.l.start||'').localeCompare(b.l.start||'');
+      });
+    };
+    try{renderAll();}catch(e){}
+  }
+})();
+</script>
   
 </body>
 </html>
