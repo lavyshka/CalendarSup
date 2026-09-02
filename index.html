@@ -2662,6 +2662,82 @@ if(head&&!document.getElementById('cleanBtn')){
 try{renderAll();}catch(e){}
 })();
 </script>  
+
+<!-- ===== ФИКС 3: безопасный архив вместо удаления старых шаблонов ===== -->
+<script>
+(function(){
+function st(){return window.__app.state();}
+function studentName(id){
+  var s=st();
+  for(var i=0;i<s.students.length;i++)if(s.students[i].id===id)return (s.students[i].emoji?s.students[i].emoji+' ':'')+s.students[i].name;
+  return 'занятие';
+}
+
+/* архивные шаблоны не показываются в календаре и не мешают */
+var prevLO=window.lessonsOn;
+if(prevLO)window.lessonsOn=function(date,all){
+  return prevLO(date,all).filter(function(o){return !o.l.archived});
+};
+
+function ensureModal2(){
+  if(document.getElementById('mClean2'))return;
+  var w=document.createElement('div');
+  w.innerHTML='<div class="overlay" id="mClean2" onclick="if(event.target===this)closeModal(\'mClean2\')">'+
+   '<div class="modal" style="max-width:560px"><h3>🧹 Старые шаблоны</h3>'+
+   '<p class="muted">Завершённые шаблоны хранят статистику и баланс прошлых месяцев. Удалять их не нужно: они не видны в календаре и не мешают новым урокам. Если список мешает — спрячьте в архив.</p>'+
+   '<div id="cleanBody2"></div>'+
+   '<div class="modal-actions"><button class="btn ghost" id="cleanClose2">Закрыть</button></div></div></div>';
+  document.body.appendChild(w);
+  document.getElementById('cleanClose2').addEventListener('click',function(){closeModal('mClean2')});
+  document.getElementById('cleanBody2').addEventListener('click',function(e){
+    var b=e.target.closest('[data-act]');if(!b)return;
+    var id=b.getAttribute('data-id'),act=b.getAttribute('data-act');
+    var s=st(),l=null;
+    for(var i=0;i<s.lessons.length;i++)if(String(s.lessons[i].id)===id)l=s.lessons[i];
+    if(!l)return;
+    if(act==='archive'){l.archived=true;save();renderAll();renderList();toast('📘 Шаблон в архиве — статистика сохранена');}
+    if(act==='restore'){delete l.archived;save();renderAll();renderList();toast('↩️ Шаблон возвращён');}
+    if(act==='wipe'){
+      if(!confirm('⚠️ Удалить шаблон НАВСЕГДА? Уроки и статистика за прошлые месяцы по нему потеряются, баланс пересчитается. Отменить будет нельзя.'))return;
+      s.lessons=s.lessons.filter(function(x){return String(x.id)!==id});
+      save();renderAll();renderList();toast('🗑️ Шаблон удалён');
+    }
+  });
+}
+function renderList(){
+  var s=st(),t=iso(new Date());
+  var ended=s.lessons.filter(function(l){return l.endDate&&l.endDate<t&&!l.archived});
+  var arch=s.lessons.filter(function(l){return l.archived});
+  var html='<div class="muted" style="font-weight:800;margin:6px 0">Завершённые (хранят статистику):</div>';
+  html+=ended.length?ended.map(function(l){
+    return '<div class="rowline"><span>'+studentName(l.studentId)+' · '+DOW[l.day-1]+' '+l.start+'–'+l.end+
+      ' <span class="muted">· до '+fmtS(fromISO(l.endDate))+'</span></span>'+
+      '<span style="display:flex;gap:6px">'+
+      '<button class="btn ghost sm" data-act="archive" data-id="'+l.id+'">📦 В архив</button>'+
+      '<button class="btn danger sm" data-act="wipe" data-id="'+l.id+'">🗑</button></span></div>';
+  }).join(''):'<div class="muted">нет</div>';
+  if(arch.length){
+    html+='<div class="muted" style="font-weight:800;margin:14px 0 6px">📦 В архиве (скрыты):</div>';
+    html+=arch.map(function(l){
+      return '<div class="rowline"><span>'+studentName(l.studentId)+' · '+DOW[l.day-1]+' '+l.start+'–'+l.end+'</span>'+
+      '<button class="btn ghost sm" data-act="restore" data-id="'+l.id+'">↩️ Вернуть</button></div>';
+    }).join('');
+  }
+  document.getElementById('cleanBody2').innerHTML=html;
+}
+var btn=document.getElementById('cleanBtn');
+if(btn){
+  btn.onclick=function(e){e.preventDefault();ensureModal2();renderList();openModal('mClean2');};
+}else{
+  var head=document.querySelector('#sec-schedule .sec-head');
+  var b2=document.createElement('button');
+  b2.id='cleanBtn';b2.className='btn ghost sm';b2.textContent='🧹 Старые шаблоны';
+  b2.onclick=function(){ensureModal2();renderList();openModal('mClean2');};
+  head.appendChild(b2);
+}
+try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
