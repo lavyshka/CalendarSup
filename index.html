@@ -2562,6 +2562,106 @@ try{renderAll();}catch(e){}
   }
 })();
 </script>
+
+<!-- ===== ФИКС: умная проверка конфликтов + уборка завершённых шаблонов ===== -->
+<script>
+(function(){
+function st(){return window.__app.state();}
+function studentName(id){
+  var s=st();
+  for(var i=0;i<s.students.length;i++)if(s.students[i].id===id)return (s.students[i].emoji?s.students[i].emoji+' ':'')+s.students[i].name;
+  return 'занятие';
+}
+
+window.saveLesson=function(){
+  var s=st();
+  var id=document.getElementById('lessonId').value;
+  var cb=document.getElementById('lessonOneOff');
+  var on=!!(cb&&cb.checked);
+  var err=document.getElementById('lessonErr');
+  err.style.display='none';
+  var day=+document.getElementById('lessonDay').value;
+  var start=document.getElementById('lessonStart').value;
+  var end=document.getElementById('lessonEnd').value;
+  var studentId=document.getElementById('lessonStudent').value;
+  if(!start||!end||!studentId){err.textContent='⚠️ Заполните все поля';err.style.display='block';return;}
+  if(start>=end){err.textContent='⚠️ Окончание должно быть позже начала';err.style.display='block';return;}
+  var startDate=null,endDate=null,oneOff=false;
+  if(on){
+    var od=document.getElementById('lessonOneOffDate').value;
+    if(!od){err.textContent='⚠️ Укажите дату разового урока';err.style.display='block';return;}
+    day=dayNum(fromISO(od))+1;startDate=od;endDate=od;oneOff=true;
+    var occ=lessonsOn(fromISO(od),true).filter(function(o){return String(o.l.id)!==String(id)&&start<o.l.end&&end>o.l.start});
+    if(occ.length){
+      err.textContent='⚠️ Пересекается с занятием: '+studentName(occ[0].l.studentId)+' ('+occ[0].l.start+'–'+occ[0].l.end+') '+fmtS(fromISO(od));
+      err.style.display='block';return;
+    }
+  }else{
+    startDate=document.getElementById('lessonStartDate').value||null;
+    var from=startDate||iso(new Date());
+    var conf=null;
+    for(var i=0;i<s.lessons.length;i++){
+      var l=s.lessons[i];
+      if(String(l.id)===String(id))continue;
+      if(l.day!==day)continue;
+      if(!(start<l.end&&end>l.start))continue;
+      if(l.endDate&&l.endDate<from)continue;   // шаблон завершён — не конфликт
+      conf=l;break;
+    }
+    if(conf){
+      err.textContent='⚠️ Пересекается с занятием: '+studentName(conf.studentId)+' ('+conf.start+'–'+conf.end+')'+
+        (conf.endDate?' — действовало до '+fmtS(fromISO(conf.endDate)):'')+
+        '. Завершите или удалите старый шаблон (🧹), либо выберите другое время.';
+      err.style.display='block';return;
+    }
+  }
+  if(id){
+    for(var j=0;j<s.lessons.length;j++)if(String(s.lessons[j].id)===String(id))
+      Object.assign(s.lessons[j],{day:day,start:start,end:end,studentId:studentId,startDate:startDate,endDate:endDate,oneOff:oneOff});
+  }else{
+    s.lessons.push({id:Date.now(),day:day,start:start,end:end,studentId:studentId,startDate:startDate,endDate:endDate,oneOff:oneOff,exceptions:[],overrides:[]});
+  }
+  save();renderAll();closeModal('mLesson');
+  toast(oneOff?'✓ Разовый урок добавлен':'✓ Урок сохранён');
+};
+
+/* ---------- уборка завершённых шаблонов ---------- */
+function ensureCleanModal(){
+  if(document.getElementById('mClean'))return;
+  var w=document.createElement('div');
+  w.innerHTML='<div class="overlay" id="mClean" onclick="if(event.target===this)closeModal(\'mClean\')">'+
+   '<div class="modal" style="max-width:520px"><h3>🧹 Завершённые шаблоны</h3>'+
+   '<p class="muted">Это расписания, которые были закрыты («это и все будущие»). Они не показываются в календаре, но хранятся в базе. Их можно удалить навсегда.</p>'+
+   '<div id="cleanBody"></div>'+
+   '<div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'mClean\')">Закрыть</button></div></div></div>';
+  document.body.appendChild(w);
+  document.getElementById('cleanBody').addEventListener('click',function(e){
+    var b=e.target.closest('[data-del]');if(!b)return;
+    var id=b.getAttribute('data-del');
+    var s=st();
+    s.lessons=s.lessons.filter(function(l){return String(l.id)!==String(id)});
+    save();renderAll();renderClean();toast('🗑️ Шаблон удалён навсегда');
+  });
+}
+function renderClean(){
+  var s=st(),t=iso(new Date());
+  var ended=s.lessons.filter(function(l){return l.endDate&&l.endDate<t});
+  document.getElementById('cleanBody').innerHTML=ended.length?ended.map(function(l){
+    return '<div class="rowline"><span>'+studentName(l.studentId)+' · '+DOW[l.day-1]+' '+l.start+'–'+l.end+
+      ' <span class="muted">· до '+fmtS(fromISO(l.endDate))+'</span></span>'+
+      '<button class="btn danger sm" data-del="'+l.id+'">Удалить</button></div>';
+  }).join(''):'<div class="muted" style="padding:10px">Завершённых шаблонов нет 🎉</div>';
+}
+var head=document.querySelector('#sec-schedule .sec-head');
+if(head&&!document.getElementById('cleanBtn')){
+  var b=document.createElement('button');
+  b.id='cleanBtn';b.className='btn ghost sm';b.textContent='🧹 Завершённые шаблоны';
+  b.onclick=function(){ensureCleanModal();renderClean();openModal('mClean');};
+  head.appendChild(b);
+}
+try{renderAll();}catch(e){}
+})();
+</script>  
   
 </body>
 </html>
