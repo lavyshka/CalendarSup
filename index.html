@@ -2738,6 +2738,80 @@ if(btn){
 try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ПАТЧ: кнопка «Расписание» на карточке ученика ===== -->
+<script>
+(function(){
+if(!document.getElementById('mSched')){
+  var w=document.createElement('div');
+  w.innerHTML='<div class="overlay" id="mSched" onclick="if(event.target===this)closeModal(\'mSched\')">'+
+   '<div class="modal" style="max-width:980px">'+
+   '<h3 id="schTitle"></h3>'+
+   '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:10px">'+
+   '<button class="btn ghost sm" onclick="schShift(-1)">◀ Назад</button>'+
+   '<b id="schRange" style="text-align:center"></b>'+
+   '<button class="btn ghost sm" onclick="schShift(1)">Вперед ▶</button></div>'+
+   '<div class="cal-scroll" style="margin-top:14px"><div id="schBody"></div></div>'+
+   '<p class="hint">💡 Клик по уроку — меню действий (проведён, перенести, ДЗ). Всё как в основном расписании, только по этому ученику.</p>'+
+   '</div></div>';
+  document.body.appendChild(w);
+}
+var schStudent=null,schMonday=null;
+function openSchedule(id){
+  schStudent=id;
+  schMonday=new Date();schMonday.setHours(0,0,0,0);
+  schMonday.setDate(schMonday.getDate()-dayNum(schMonday));
+  renderSched();openModal('mSched');
+}
+window.openSchedule=openSchedule;
+window.schShift=function(dir){schMonday.setDate(schMonday.getDate()+7*dir);renderSched();};
+function renderSched(){
+  var st=window.__app.state(),s=null;
+  for(var i=0;i<st.students.length;i++)if(st.students[i].id===schStudent)s=st.students[i];
+  if(!s)return;
+  document.getElementById('schTitle').textContent='📅 '+(s.emoji?s.emoji+' ':'')+s.name;
+  var end=new Date(schMonday);end.setDate(end.getDate()+6);
+  var html='<div class="cal-grid">';
+  for(var i=0;i<7;i++){
+    var d=new Date(schMonday);d.setDate(d.getDate()+i);
+    var ds=iso(d);
+    var cls='cal-day';
+    if(ds===iso(new Date()))cls+=' today';
+    html+='<div class="'+cls+'" style="min-height:120px"><div class="cd-head"><b>'+DOW[i]+'</b><span>'+fmtS(d)+'</span></div>';
+    var ls=lessonsOn(d,true).filter(function(o){return o.l.studentId===schStudent});
+    html+=ls.length?ls.map(function(o){return chip(o.l,o.ds)}).join('')
+      :'<div class="muted" style="text-align:center;margin-top:12px">—</div>';
+    html+='</div>';
+  }
+  html+='</div>';
+  document.getElementById('schBody').innerHTML=html;
+  document.getElementById('schRange').textContent=fmtS(schMonday)+' — '+fmtS(end);
+}
+window.renderSched=renderSched;
+
+/* кнопка на карточках */
+if(window.renderStudents){
+  var prevRS=window.renderStudents;
+  window.renderStudents=function(){
+    prevRS();
+    var st=window.__app.state();
+    var cards=document.querySelectorAll('#studentsList .item');
+    for(var i=0;i<cards.length;i++){
+      var s=st.students[i];
+      if(!s||cards[i].querySelector('[data-schbtn]'))continue;
+      var b=document.createElement('button');
+      b.className='btn ghost sm';
+      b.setAttribute('data-schbtn','1');
+      b.style.cssText='margin-top:8px;width:100%';
+      b.textContent='📅 Расписание';
+      (function(sid){b.onclick=function(ev){ev.stopPropagation();openSchedule(sid);};})(s.id);
+      cards[i].appendChild(b);
+    }
+  };
+}
+try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
