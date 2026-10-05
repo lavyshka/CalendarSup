@@ -2812,6 +2812,187 @@ if(window.renderStudents){
 try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ПАТЧ: цена в карточке, оплата из календаря, статистика по месяцам ===== -->
+<script>
+(function(){
+function st(){return window.__app.state();}
+function money(n){return n.toLocaleString('ru-RU')+' ₽'}
+
+/* ---------- 1) Цена занятия в карточке ученика ---------- */
+if(!document.getElementById('stPrice')){
+  var hist=document.getElementById('stHistory');
+  if(hist){
+    var lbl=document.createElement('label');lbl.textContent='Стоимость одного занятия (₽)';
+    var inp=document.createElement('input');inp.type='number';inp.id='stPrice';inp.min='0';inp.placeholder='например, 650';
+    hist.parentNode.insertBefore(lbl,hist);
+    hist.parentNode.insertBefore(inp,hist);
+  }
+}
+var prevOSM=window.openStudentModal;
+window.openStudentModal=function(id){
+  prevOSM(id);
+  var s=st(),stu=null;
+  if(id)for(var i=0;i<s.students.length;i++)if(s.students[i].id===id)stu=s.students[i];
+  document.getElementById('stPrice').value=stu&&stu.price?stu.price:'';
+};
+window.saveStudent=function(){
+  var s=st();
+  var id=document.getElementById('studentId').value;
+  var data={
+    name:document.getElementById('stName').value.trim(),
+    grade:document.getElementById('stGrade').value,
+    emoji:document.getElementById('stEmoji').value,
+    color:document.getElementById('stColor').value,
+    contacts:document.getElementById('stContacts').value,
+    holst:document.getElementById('stHolst').value,
+    telemost:document.getElementById('stTelemost').value,
+    hobbies:document.getElementById('stHobbies').value,
+    level:document.getElementById('stLevel').value,
+    textbook:document.getElementById('stTextbook').value,
+    price:+(document.getElementById('stPrice').value||0)||0
+  };
+  if(!data.name)return;
+  if(id){
+    for(var i=0;i<s.students.length;i++)if(s.students[i].id===id)Object.assign(s.students[i],data);
+  }else{
+    s.students.push(Object.assign({id:'s'+Date.now()},data));
+  }
+  save();renderAll();closeModal('mStudent');toast('✓ Карточка сохранена');
+};
+/* цена видна на карточке */
+if(window.renderStudents){
+  var prevRS=window.renderStudents;
+  window.renderStudents=function(){
+    prevRS();
+    var s=st();
+    var cards=document.querySelectorAll('#studentsList .item');
+    for(var i=0;i<cards.length;i++){
+      var stu=s.students[i];
+      if(!stu||!stu.price||cards[i].querySelector('[data-priceline]'))continue;
+      var pd=document.createElement('div');
+      pd.className='muted';pd.setAttribute('data-priceline','1');
+      pd.style.cssText='margin-top:8px;font-weight:700';
+      pd.textContent='💵 '+stu.price+' ₽ за занятие';
+      var firstBtn=cards[i].querySelector('button.btn.ghost.sm');
+      if(firstBtn)cards[i].insertBefore(pd,firstBtn);else cards[i].appendChild(pd);
+    }
+  };
+}
+/* цена сама подставляется во внесении оплаты */
+function syncPayPrice(){
+  var s=st();
+  var id=document.getElementById('payStudent').value;
+  for(var i=0;i<s.students.length;i++)if(s.students[i].id===id&&s.students[i].price){
+    document.getElementById('payPrice').value=s.students[i].price;
+    if(window.calcTotal)calcTotal();
+    return;
+  }
+}
+var prevOPM=window.openPayModal;
+window.openPayModal=function(){prevOPM();syncPayPrice();};
+document.getElementById('payStudent').addEventListener('change',syncPayPrice);
+/* и в календаре-счёте */
+function fixInvPrice(){
+  var s=st();
+  var id=document.getElementById('invStudent').value;
+  for(var i=0;i<s.students.length;i++)if(s.students[i].id===id&&s.students[i].price){
+    var pi=document.getElementById('invPrice');
+    if(+pi.value!==s.students[i].price){pi.value=s.students[i].price;if(window.updateInvTotal)updateInvTotal();}
+    return;
+  }
+}
+var prevOI=window.openInvoice;
+window.openInvoice=function(id){prevOI(id);fixInvPrice();};
+var prevIS=window.invShift;
+window.invShift=function(d){prevIS(d);fixInvPrice();};
+document.getElementById('invStudent').addEventListener('change',fixInvPrice);
+
+/* ---------- 2) Кнопка «Оплачено» в календаре для оплаты ---------- */
+function countLessonsMonth(s,id,y,m){
+  var n=0,d=new Date(y,m,1),last=new Date(y,m+1,0);
+  while(d<=last){
+    var ds=iso(d);
+    for(var i=0;i<s.lessons.length;i++){
+      var l=s.lessons[i];
+      if(l.studentId!==id||l.archived)continue;
+      var reg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+      if(reg||(l.overrides||[]).includes(ds)){n++;break;}
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return n;
+}
+function payFromInvoice(){
+  try{
+    var s=st();
+    var id=document.getElementById('invStudent').value;
+    var t=document.getElementById('invMonth').textContent.trim().split(/\s+/);
+    var m=MONTHS.indexOf(t[0]),y=+t[1];
+    if(m<0||!y){toast('⚠️ Не поняла месяц');return;}
+    var days=countLessonsMonth(s,id,y,m);
+    var price=+document.getElementById('invPrice').value||0;
+    if(!days){toast('⚠️ В этом месяце нет уроков');return;}
+    if(!price){toast('⚠️ Укажите стоимость занятия');return;}
+    if(!confirm('Зафиксировать оплату за '+MONTHS[m]+' '+y+': '+days+' уроков × '+price+' ₽ = '+money(days*price)+'?'))return;
+    s.payments.push({id:Date.now(),studentId:id,count:days,price:price,date:iso(new Date())});
+    save();renderAll();
+    if(window.invShift)window.invShift(0);
+    toast('💳 Оплата зафиксирована: '+money(days*price));
+  }catch(e){toast('Ошибка: '+e.message);}
+}
+var invModal=document.querySelector('#mInvoice .modal');
+if(invModal&&!document.getElementById('invPayBtn')){
+  var pb=document.createElement('button');
+  pb.id='invPayBtn';pb.className='btn primary';
+  pb.style.cssText='width:100%;margin-top:16px';
+  pb.textContent='💳 Оплачено за этот месяц';
+  pb.onclick=payFromInvoice;
+  var hint=invModal.querySelector('.hint');
+  if(hint)invModal.insertBefore(pb,hint);else invModal.appendChild(pb);
+}
+
+/* ---------- 3) Статистика: отдельная карточка на каждый месяц ---------- */
+var prevRP=window.renderPayments;
+window.renderPayments=function(){
+  prevRP();
+  var s=st();
+  var map={};
+  s.payments.forEach(function(p){var d=fromISO(p.date);var k=d.getFullYear()+'-'+pad(d.getMonth()+1);(map[k]=map[k]||{pay:[],exp:[]}).pay.push(p);});
+  s.expenses.forEach(function(e){var d=fromISO(e.date);var k=d.getFullYear()+'-'+pad(d.getMonth()+1);(map[k]=map[k]||{pay:[],exp:[]}).exp.push(e);});
+  var now=new Date();var k0=now.getFullYear()+'-'+pad(now.getMonth()+1);map[k0]=map[k0]||{pay:[],exp:[]};
+  var keys=Object.keys(map).sort().reverse();
+  var totalIn=0,totalOut=0;
+  var html='<div class="sec-head" style="margin-top:26px"><h2>📊 Статистика по месяцам</h2>'+
+    '<button class="btn primary" onclick="openExpense()">+ Добавить расход</button></div>'+
+    '<p class="hint">💡 Нажмите на карточку оплаты ниже — откроется персональный календарь для родителей.</p>';
+  keys.forEach(function(k){
+    var y=+k.split('-')[0],m=+k.split('-')[1]-1;
+    var inc=map[k].pay.reduce(function(t,p){return t+p.count*p.price},0);
+    var out=map[k].exp.reduce(function(t,e){return t+ +e.amount},0);
+    totalIn+=inc;totalOut+=out;
+    html+='<div class="item" style="cursor:default;margin-bottom:14px">'+
+      '<h3 style="margin:0 0 12px">🗓 '+MONTHS[m]+' '+y+'</h3>'+
+      '<div class="muted" style="font-weight:800;color:var(--ok)">Доходы: +'+money(inc)+'</div>'+
+      (map[k].pay.length?map[k].pay.slice().reverse().map(function(p){
+        var d=fromISO(p.date);
+        return '<div class="rowline"><span>'+sName(p.studentId)+' · '+p.count+' зан. × '+p.price+' ₽ <span class="muted">('+fmtS(d)+')</span></span><b>+'+money(p.count*p.price)+'</b></div>';
+      }).join(''):'<div class="muted" style="padding:6px 4px">доходов не было</div>')+
+      '<div class="muted" style="font-weight:800;color:var(--warn);margin-top:12px">Расходы: −'+money(out)+'</div>'+
+      (map[k].exp.length?map[k].exp.slice().reverse().map(function(e){
+        var d=fromISO(e.date);
+        return '<div class="rowline"><span>'+esc(e.name)+' <span class="muted">('+fmtS(d)+')</span></span><b>−'+money(+e.amount)+'</b></div>';
+      }).join(''):'<div class="muted" style="padding:6px 4px">расходов не было</div>')+
+      '<div class="rowline" style="margin-top:12px;border-top:1px solid var(--brd)"><span><b>Прибыль за месяц</b></span><b style="color:'+(inc-out>=0?'var(--ok)':'var(--warn)')+'">'+money(inc-out)+'</b></div>'+
+      '</div>';
+  });
+  html+='<div class="item" style="cursor:default"><div class="rowline"><span><b>Итого за всё время</b></span><span><span style="color:var(--ok)">+'+money(totalIn)+'</span> · <span style="color:var(--warn)">−'+money(totalOut)+'</span> · <b>'+money(totalIn-totalOut)+'</b></span></div></div>';
+  document.getElementById('payStats').innerHTML=html;
+};
+
+try{renderAll();}catch(e){}
+})();
+</script>  
   
 </body>
 </html>
