@@ -3584,6 +3584,91 @@ if(window.renderChecklist){
 try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ПАТЧ: диагностика «почему такая цифра» ===== -->
+<script>
+(function(){
+function st(){return window.__app.state();}
+function occDates(l,from,to){
+  var res=[],d=new Date(from);
+  while(d<=to){
+    var ds=iso(d);
+    var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+    var over=(l.overrides||[]).indexOf(ds)>=0;
+    if((isReg||over)&&mark(l.id,ds)!=='missed')
+      res.push(fmtS(d)+(l.oneOff?' (🎯 разовый)':(over&&!isReg?' (перенос)':(' '+DOW[dayNum(d)]))));
+    d.setDate(d.getDate()+1);
+  }
+  return res;
+}
+function openDiag(){
+  try{
+    var s=st();
+    var id=document.getElementById('invStudent').value;
+    var t=document.getElementById('invMonth').textContent.trim().split(/\s+/);
+    var m=MONTHS.indexOf(t[0]),y=+t[1];
+    var endPrev=iso(new Date(y,m,0));
+    var pays=s.payments.filter(function(p){return p.studentId===id});
+    var paid=pays.reduce(function(t2,p){return t2+(+p.count||0)},0);
+    var fp=null;pays.forEach(function(p){if(!fp||p.date<fp)fp=p.date});
+    var lines=[];
+    lines.push('ОПЛАТЫ (все): '+(pays.length?pays.map(function(p){return fmtS(fromISO(p.date))+' ×'+p.count}).join(', '):'нет'));
+    lines.push('ИТОГО оплачено: '+paid);
+    lines.push('--- проведено, засчитанное до '+fmtS(fromISO(endPrev))+' ---');
+    var spent=0;
+    s.lessons.filter(function(l){return l.studentId===id&&!l.archived}).forEach(function(l){
+      var from=l.startDate||fp||iso(new Date(Date.now()-30*864e5));
+      if(from>endPrev)return;
+      var ds=occDates(l,fromISO(from),fromISO(endPrev));
+      spent+=ds.length;
+      lines.push('Урок '+l.start+'–'+l.end+' ('+(l.oneOff?'🎯 разовый':'кажд. '+DOW[l.day-1])+', с '+from+'): '+ (ds.length?ds.join(', '):'—'));
+    });
+    lines.push('ИТОГО проведено: '+spent);
+    lines.push('ПЕРЕНОС в '+MONTHS[m]+': '+paid+' − '+spent+' = '+(paid-spent));
+    if(!document.getElementById('mDiag')){
+      var w=document.createElement('div');
+      w.innerHTML='<div class="overlay" id="mDiag" onclick="if(event.target===this)closeModal(\'mDiag\')">'+
+        '<div class="modal" style="max-width:600px"><h3>🔎 Почему такая цифра</h3>'+
+        '<div id="diagBody" style="font-size:.9rem;line-height:1.8;white-space:pre-wrap;font-family:Menlo,Consolas,monospace;margin-top:12px"></div>'+
+        '<div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'mDiag\')">Закрыть</button></div></div></div>';
+      document.body.appendChild(w);
+    }
+    document.getElementById('diagBody').textContent=lines.join('\n');
+    openModal('mDiag');
+  }catch(e){toast('Ошибка: '+e.message);}
+}
+window.openDiag=openDiag;
+var invModal=document.querySelector('#mInvoice .modal');
+if(invModal&&!document.getElementById('diagBtn')){
+  var b=document.createElement('button');
+  b.id='diagBtn';b.className='btn ghost sm';
+  b.style.cssText='width:100%;margin-top:8px';
+  b.textContent='🔎 Почему такая цифра? (проверка)';
+  b.onclick=openDiag;
+  invModal.appendChild(b);
+}
+})();
+</script>
+
+<!-- ===== МИКРО-ПАТЧ: ❌ = отменён, но оплачен ===== -->
+<script>
+(function(){
+  document.querySelectorAll('#ctx button').forEach(function(b){
+    if(b.textContent.indexOf('❌')===0)b.textContent='❌ Отменён (оплачен, уйдёт в перенос)';
+  });
+  var prevChip=window.chip;
+  if(prevChip){
+    window.chip=function(l,ds){
+      var html=prevChip(l,ds);
+      if(mark(l.id,ds)==='missed'){
+        html=html.replace('<div class="chip-pay ','<div class="chip-hw">🔄 перенос</div><div class="chip-pay ');
+      }
+      return html;
+    };
+  }
+  try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
