@@ -2993,6 +2993,126 @@ window.renderPayments=function(){
 try{renderAll();}catch(e){}
 })();
 </script>  
+
+<!-- ===== ПАТЧ: перенос отменённых уроков в оплату следующего месяца ===== -->
+<script>
+(function(){
+function st(){return window.__app.state();}
+function money(n){return n.toLocaleString('ru-RU')+' ₽'}
+function countOcc(l,from,to){
+  var n=0,d=new Date(from),reg={},fs=iso(from),ts=iso(to);
+  while(d<=to){
+    var ds=iso(d);
+    var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+    if(isReg){if(mark(l.id,ds)!=='missed')n++;reg[ds]=1;}
+    d.setDate(d.getDate()+1);
+  }
+  (l.overrides||[]).forEach(function(ds){if(ds>=fs&&ds<=ts&&!reg[ds]&&mark(l.id,ds)!=='missed')n++;});
+  return n;
+}
+function balanceAt(s,id,ds){
+  var paid=s.payments.filter(function(p){return p.studentId===id}).reduce(function(t,p){return t+(+p.count||0)},0);
+  var to=fromISO(ds);
+  var today=new Date();today.setHours(0,0,0,0);
+  var firstPay=null;
+  s.payments.filter(function(p){return p.studentId===id}).forEach(function(p){var d=fromISO(p.date);if(!firstPay||d<firstPay)firstPay=d});
+  var spent=0;
+  s.lessons.filter(function(l){return l.studentId===id&&!l.archived}).forEach(function(l){
+    var from;
+    if(l.startDate)from=fromISO(l.startDate);
+    else if(firstPay)from=firstPay;
+    else{from=new Date(today);from.setDate(from.getDate()-30)}
+    if(from>to)return;
+    spent+=countOcc(l,from,to);
+  });
+  return paid-spent;
+}
+function countLessonsMonth(s,id,y,m){
+  var n=0,d=new Date(y,m,1),last=new Date(y,m+1,0);
+  while(d<=last){
+    var ds=iso(d);
+    for(var i=0;i<s.lessons.length;i++){
+      var l=s.lessons[i];
+      if(l.studentId!==id||l.archived)continue;
+      var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+      if(isReg||(l.overrides||[]).includes(ds)){n++;break;}
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return n;
+}
+function paidInMonth(s,id,y,m){
+  return s.payments.filter(function(p){
+    var d=fromISO(p.date);return p.studentId===id&&d.getFullYear()===y&&d.getMonth()===m;
+  }).reduce(function(t,p){return t+(+p.count||0)},0);
+}
+function invMonthParse(){
+  var t=document.getElementById('invMonth').textContent.trim().split(/\s+/);
+  return{m:MONTHS.indexOf(t[0]),y:+t[1]};
+}
+function updateCreditLine(){
+  var el=document.getElementById('invCreditLine');
+  if(!el){
+    el=document.createElement('div');el.id='invCreditLine';
+    el.style.cssText='margin-top:10px;font-weight:700;font-size:.95rem;line-height:1.7';
+    var cnt=document.getElementById('invCount');
+    cnt.parentNode.insertBefore(el,cnt.nextSibling);
+  }
+  var s=st();
+  var id=document.getElementById('invStudent').value;
+  var mo=invMonthParse();if(mo.m<0||!mo.y)return;
+  var sched=countLessonsMonth(s,id,mo.y,mo.m);
+  var credit=balanceAt(s,id,iso(new Date(mo.y,mo.m,0)));
+  var paidM=paidInMonth(s,id,mo.y,mo.m);
+  var toPay=Math.max(0,sched-credit-paidM);
+  window.__invToPay=toPay;
+  var lines=[];
+  if(credit>0)lines.push('<span style="color:var(--ok)">🔄 Перенос с прошлого месяца: +'+credit+' урок</span>');
+  if(credit<0)lines.push('<span style="color:var(--warn)">⚠️ Долг с прошлого месяца: '+(-credit)+' урок</span>');
+  if(paidM>0)lines.push('<span style="color:var(--ok)">💳 Оплачено в этом месяце: '+paidM+' уроков</span>');
+  el.innerHTML=lines.length?lines.join('<br>'):'<span class="muted">🔄 Переносов с прошлого месяца нет</span>';
+  var price=+document.getElementById('invPrice').value||0;
+  var total=document.getElementById('invTotal');
+  if(toPay<=0){total.textContent='🎉 Месяц уже оплачен полностью';total.style.color='var(--ok)';}
+  else{total.textContent='К оплате: '+toPay+' уроков × '+price+' ₽ = '+money(toPay*price);total.style.color='';}
+  var btn=document.getElementById('invPayBtn');
+  if(btn)btn.textContent=toPay<=0?'✅ Месяц оплачен':'💳 Оплатить за этот месяц ('+toPay+' уроков)';
+}
+window.updateCreditLine=updateCreditLine;
+
+var prevOI=window.openInvoice;
+window.openInvoice=function(id){prevOI(id);updateCreditLine();};
+var prevIS=window.invShift;
+window.invShift=function(d){prevIS(d);updateCreditLine();};
+document.getElementById('invStudent').addEventListener('change',function(){updateCreditLine();});
+document.getElementById('invPrice').addEventListener('input',function(){updateCreditLine();});
+
+function payFromInvoice2(){
+  try{
+    var s=st();
+    var id=document.getElementById('invStudent').value;
+    var mo=invMonthParse();
+    var toPay=window.__invToPay||0;
+    var price=+document.getElementById('invPrice').value||0;
+    if(toPay<=0){toast('🎉 Месяц уже оплачен полностью');return;}
+    if(!price){toast('⚠️ Укажите стоимость занятия');return;}
+    if(!confirm('Зафиксировать оплату за '+MONTHS[mo.m]+' '+mo.y+':\nк оплате '+toPay+' уроков × '+price+' ₽ = '+money(toPay*price)+'\n(переносы и внесённые оплаты уже учтены)'))return;
+    s.payments.push({id:Date.now(),studentId:id,count:toPay,price:price,date:iso(new Date())});
+    save();renderAll();
+    if(window.invShift)window.invShift(0);
+    toast('💳 Оплата зафиксирована: '+money(toPay*price));
+  }catch(e){toast('Ошибка: '+e.message);}
+}
+var pb=document.getElementById('invPayBtn');
+if(pb){
+  var pb2=pb.cloneNode(true);
+  pb.parentNode.replaceChild(pb2,pb);
+  pb2.id='invPayBtn';
+  pb2.addEventListener('click',payFromInvoice2);
+}
+try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
