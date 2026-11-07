@@ -3113,6 +3113,218 @@ if(pb){
 try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ПАТЧ: чек-лист «Отправила календарь — жду оплату» ===== -->
+<script>
+(function(){
+function st(){return window.__app.state();}
+function money(n){return n.toLocaleString('ru-RU')+' ₽'}
+function key(id,ym){return id+'|'+ym}
+function track(){var s=st();s.payTrack=s.payTrack||{};return s.payTrack;}
+function ymOf(y,m){return y+'-'+pad(m+1)}
+function ymLabel(ym){var p=ym.split('-');return MONTHS[+p[1]-1]+' '+p[0]}
+function ymParse(text){var t=text.trim().split(/\s+/);return{m:MONTHS.indexOf(t[0]),y:+t[1]}}
+
+/* расчёты (копии из патча переносов) */
+function countOcc(l,from,to){
+  var n=0,d=new Date(from),reg={},fs=iso(from),ts=iso(to);
+  while(d<=to){
+    var ds=iso(d);
+    var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+    if(isReg){if(mark(l.id,ds)!=='missed')n++;reg[ds]=1;}
+    d.setDate(d.getDate()+1);
+  }
+  (l.overrides||[]).forEach(function(ds){if(ds>=fs&&ds<=ts&&!reg[ds]&&mark(l.id,ds)!=='missed')n++;});
+  return n;
+}
+function balanceAt(s,id,ds){
+  var paid=s.payments.filter(function(p){return p.studentId===id}).reduce(function(t,p){return t+(+p.count||0)},0);
+  var to=fromISO(ds);
+  var today=new Date();today.setHours(0,0,0,0);
+  var firstPay=null;
+  s.payments.filter(function(p){return p.studentId===id}).forEach(function(p){var d=fromISO(p.date);if(!firstPay||d<firstPay)firstPay=d});
+  var spent=0;
+  s.lessons.filter(function(l){return l.studentId===id&&!l.archived}).forEach(function(l){
+    var from;
+    if(l.startDate)from=fromISO(l.startDate);
+    else if(firstPay)from=firstPay;
+    else{from=new Date(today);from.setDate(from.getDate()-30)}
+    if(from>to)return;
+    spent+=countOcc(l,from,to);
+  });
+  return paid-spent;
+}
+function countLessonsMonth(s,id,y,m){
+  var n=0,d=new Date(y,m,1),last=new Date(y,m+1,0);
+  while(d<=last){
+    var ds=iso(d);
+    for(var i=0;i<s.lessons.length;i++){
+      var l=s.lessons[i];
+      if(l.studentId!==id||l.archived)continue;
+      var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+      if(isReg||(l.overrides||[]).includes(ds)){n++;break;}
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return n;
+}
+function paidInMonth(s,id,y,m){
+  return s.payments.filter(function(p){
+    var d=fromISO(p.date);return p.studentId===id&&d.getFullYear()===y&&d.getMonth()===m;
+  }).reduce(function(t,p){return t+(+p.count||0)},0);
+}
+function priceOf(s,id){
+  for(var i=0;i<s.students.length;i++)if(s.students[i].id===id&&s.students[i].price)return s.students[i].price;
+  var ps=s.payments.filter(function(p){return p.studentId===id}).sort(function(a,b){return a.date.localeCompare(b.date)});
+  return ps.length?+ps[ps.length-1].price:0;
+}
+function toPayInfo(s,id,y,m){
+  var sched=countLessonsMonth(s,id,y,m);
+  var credit=balanceAt(s,id,iso(new Date(y,m,0)));
+  var paidM=paidInMonth(s,id,y,m);
+  return{sched:sched,credit:credit,paidM:paidM,toPay:Math.max(0,sched-credit-paidM)};
+}
+
+/* блок чек-листа во вкладке Оплата */
+var secPay=document.getElementById('sec-pay');
+if(secPay&&!document.getElementById('payChecklist')){
+  var div=document.createElement('div');div.id='payChecklist';
+  var head=secPay.querySelector('.sec-head');
+  head.parentNode.insertBefore(div,head.nextSibling);
+}
+function renderChecklist(){
+  var box=document.getElementById('payChecklist');if(!box)return;
+  var s=st(),t=track();
+  var waiting=[],paidL=[];
+  Object.keys(t).forEach(function(k){
+    var e=t[k],p=k.split('|'),id=p[0],ym=p[1];
+    var stu=null;for(var i=0;i<s.students.length;i++)if(s.students[i].id===id)stu=s.students[i];
+    if(!stu)return;
+    var info=toPayInfo(s,id,+ym.split('-')[0],+ym.split('-')[1]-1);
+    var row={id:id,ym:ym,stu:stu,e:e,info:info,price:priceOf(s,id)};
+    if(e.paid)paidL.push(row);else if(e.sent)waiting.push(row);
+  });
+  waiting.sort(function(a,b){return (a.e.sent||'').localeCompare(b.e.sent||'')});
+  paidL.sort(function(a,b){return (b.e.paid||'').localeCompare(a.e.paid||'')});
+  var html='<div class="sec-head" style="margin-top:0;margin-bottom:14px"><h2>📋 Чек-лист: отправила календарь</h2></div>';
+  if(!waiting.length&&!paidL.length){
+    html+='<div class="item" style="cursor:default;margin-bottom:18px"><div class="muted">Пока пусто. Откройте «📮 Календарь для оплаты» у ученика и нажмите «📮 Отправлено — жду оплату».</div></div>';
+  }
+  if(waiting.length){
+    html+='<div class="item" style="cursor:default;margin-bottom:14px">'+waiting.map(function(r){
+      var sum=r.info.toPay*r.price;
+      return '<div class="rowline"><span>'+(r.stu.emoji||'')+' '+esc(r.stu.name)+' <span class="muted">· '+ymLabel(r.ym)+' · отправлено '+fmtS(fromISO(r.e.sent))+'</span> '+
+        (r.info.toPay>0?'<b style="color:var(--warn)">'+money(sum)+'</b>':'<b style="color:var(--ok)">уже оплачено</b>')+'</span>'+
+        '<span style="display:flex;gap:6px">'+
+        (r.info.toPay>0?'<button class="btn primary sm" data-payid="'+r.id+'" data-payym="'+r.ym+'">💳 Оплачено</button>':'')+
+        '<button class="btn ghost sm" data-rmid="'+r.id+'" data-rmym="'+r.ym+'">✖</button></span></div>';
+    }).join('')+'</div>';
+  }
+  if(paidL.length){
+    html+='<div class="muted" style="font-weight:800;margin:6px 0">✅ Оплачено:</div><div class="item" style="cursor:default;margin-bottom:18px">'+paidL.slice(0,10).map(function(r){
+      return '<div class="rowline"><span>'+(r.stu.emoji||'')+' '+esc(r.stu.name)+' <span class="muted">· '+ymLabel(r.ym)+' · получено '+fmtS(fromISO(r.e.paid))+'</span></span>'+
+        '<button class="btn ghost sm" data-rmid="'+r.id+'" data-rmym="'+r.ym+'">✖</button></div>';
+    }).join('')+'</div>';
+  }
+  box.innerHTML=html;
+}
+window.renderChecklist=renderChecklist;
+
+document.addEventListener('click',function(e){
+  var pay=e.target.closest('[data-payid]');
+  if(pay){payFor(pay.getAttribute('data-payid'),pay.getAttribute('data-payym'));return;}
+  var rm=e.target.closest('[data-rmid]');
+  if(rm){delete track()[rm.getAttribute('data-rmid')+'|'+rm.getAttribute('data-rmym')];save();renderAll();toast('Убрала из чек-листа');}
+});
+function payFor(id,ym){
+  try{
+    var s=st();
+    var y=+ym.split('-')[0],m=+ym.split('-')[1]-1;
+    var info=toPayInfo(s,id,y,m);
+    var price=priceOf(s,id);
+    var e=track()[key(id,ym)]||{};
+    if(info.toPay<=0){
+      track()[key(id,ym)]={sent:e.sent||iso(new Date()),paid:iso(new Date())};
+      save();renderAll();toast('✅ Отмечено как оплачено');return;
+    }
+    if(!price){toast('⚠️ Нет цены: укажите её в карточке ученика');return;}
+    if(!confirm('Зафиксировать оплату за '+ymLabel(ym)+':\n'+info.toPay+' уроков × '+price+' ₽ = '+money(info.toPay*price)+'?'))return;
+    s.payments.push({id:Date.now(),studentId:id,count:info.toPay,price:price,date:iso(new Date())});
+    track()[key(id,ym)]={sent:e.sent||iso(new Date()),paid:iso(new Date())};
+    save();renderAll();toast('💳 Оплата получена: '+money(info.toPay*price)+' 🎉');
+  }catch(e){toast('Ошибка: '+e.message);}
+}
+window.payFor=payFor;
+
+/* кнопка «Отправлено» в календаре оплаты */
+var invModal=document.querySelector('#mInvoice .modal');
+if(invModal&&!document.getElementById('invSentBtn')){
+  var sb=document.createElement('button');
+  sb.id='invSentBtn';sb.className='btn ghost';
+  sb.style.cssText='width:100%;margin-top:10px';
+  invModal.insertBefore(sb,document.getElementById('invPayBtn'));
+  sb.addEventListener('click',function(){
+    var id=document.getElementById('invStudent').value;
+    var mo=ymParse(document.getElementById('invMonth').textContent);
+    if(mo.m<0||!mo.y)return;
+    var k=key(id,ymOf(mo.y,mo.m)),t=track();
+    if(t[k]&&t[k].sent&&!t[k].paid){delete t[k].sent;save();renderAll();syncSentBtn();toast('Отметку сняла');return;}
+    t[k]=t[k]||{};t[k].sent=iso(new Date());
+    save();renderAll();syncSentBtn();toast('📮 Отмечено: календарь отправлен, жду оплату');
+  });
+}
+function syncSentBtn(){
+  var b=document.getElementById('invSentBtn');if(!b)return;
+  var id=document.getElementById('invStudent').value;
+  var mo=ymParse(document.getElementById('invMonth').textContent);
+  if(mo.m<0||!mo.y){b.style.display='none';return;}
+  b.style.display='';
+  var e=track()[key(id,ymOf(mo.y,mo.m))];
+  if(e&&e.paid){b.textContent='✅ Оплата получена '+fmtS(fromISO(e.paid));b.disabled=true;}
+  else if(e&&e.sent){b.textContent='📮 Отправлено '+fmtS(fromISO(e.sent))+' — жду (нажмите, чтобы снять)';b.disabled=false;}
+  else{b.textContent='📮 Отправлено — жду оплату';b.disabled=false;}
+}
+if(window.updateCreditLine){
+  var prevUCL=window.updateCreditLine;
+  window.updateCreditLine=function(){prevUCL();syncSentBtn();};
+}
+
+/* кнопка оплаты в календаре теперь ещё и отмечает «оплачено» в чек-листе */
+var ipb=document.getElementById('invPayBtn');
+if(ipb){
+  var ipb2=ipb.cloneNode(true);
+  ipb.parentNode.replaceChild(ipb2,ipb);
+  ipb2.id='invPayBtn';
+  ipb2.addEventListener('click',function(){
+    try{
+      var s=st();
+      var id=document.getElementById('invStudent').value;
+      var mo=ymParse(document.getElementById('invMonth').textContent);
+      if(mo.m<0||!mo.y)return;
+      var ym=ymOf(mo.y,mo.m);
+      var info=toPayInfo(s,id,mo.y,mo.m);
+      var price=+document.getElementById('invPrice').value||priceOf(s,id);
+      if(info.toPay<=0){toast('🎉 Месяц уже оплачен полностью');return;}
+      if(!price){toast('⚠️ Укажите стоимость занятия');return;}
+      if(!confirm('Зафиксировать оплату за '+MONTHS[mo.m]+' '+mo.y+':\nк оплате '+info.toPay+' уроков × '+price+' ₽ = '+money(info.toPay*price)+'\n(переносы и внесённые оплаты уже учтены)'))return;
+      s.payments.push({id:Date.now(),studentId:id,count:info.toPay,price:price,date:iso(new Date())});
+      var t=track();t[key(id,ym)]=t[key(id,ym)]||{};
+      if(!t[key(id,ym)].sent)t[key(id,ym)].sent=iso(new Date());
+      t[key(id,ym)].paid=iso(new Date());
+      save();renderAll();
+      if(window.invShift)window.invShift(0);
+      toast('💳 Оплата получена: '+money(info.toPay*price)+' 🎉');
+    }catch(e){toast('Ошибка: '+e.message);}
+  });
+}
+
+if(window.renderPayments){
+  var prevRP=window.renderPayments;
+  window.renderPayments=function(){prevRP();renderChecklist();};
+}
+try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
