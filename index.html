@@ -3669,6 +3669,312 @@ if(invModal&&!document.getElementById('diagBtn')){
   try{renderAll();}catch(e){}
 })();
 </script>
+
+<!-- ===== ФИНАЛЬНЫЙ БЛОК: единая математика оплат + диагностика + подписи ===== -->
+<script>
+(function(){
+function st(){return window.__app.state();}
+function money(n){return n.toLocaleString('ru-RU')+' ₽'}
+function ymOf(y,m){return y+'-'+pad(m+1)}
+function ymLabel(ym){var p=ym.split('-');return MONTHS[+p[1]-1]+' '+p[0]}
+function ymParse(text){var t=text.trim().split(/\s+/);return{m:MONTHS.indexOf(t[0]),y:+t[1]}}
+function bf(){var s=st();return (s.settings&&s.settings.balanceFrom)||'';}
+function ge(ds){var b=bf();return !b||ds>=b;}
+function shift30(){var d=new Date();d.setDate(d.getDate()-30);return iso(d);}
+function priceOf(s,id){
+  for(var i=0;i<s.students.length;i++)if(s.students[i].id===id&&s.students[i].price)return s.students[i].price;
+  var ps=s.payments.filter(function(p){return p.studentId===id}).sort(function(a,b){return a.date.localeCompare(b.date)});
+  return ps.length?+ps[ps.length-1].price:0;
+}
+function paidUpTo(s,id,ds){
+  return s.payments.filter(function(p){return p.studentId===id&&ge(p.date)&&p.date<=ds}).reduce(function(t,p){return t+(+p.count||0)},0);
+}
+function paidInMonthC(s,id,y,m){
+  return s.payments.filter(function(p){var d=fromISO(p.date);return p.studentId===id&&ge(p.date)&&d.getFullYear()===y&&d.getMonth()===m}).reduce(function(t,p){return t+(+p.count||0)},0);
+}
+function firstPayC(s,id){var fp=null;s.payments.forEach(function(p){if(p.studentId===id&&ge(p.date)&&(!fp||p.date<fp))fp=p.date});return fp;}
+function countOccC(l,from,to){
+  var n=0,d=new Date(from),reg={},fs=iso(from),ts=iso(to);
+  while(d<=to){
+    var ds=iso(d);
+    if(ge(ds)){
+      var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+      if(isReg){if(mark(l.id,ds)!=='missed')n++;reg[ds]=1;}
+    }
+    d.setDate(d.getDate()+1);
+  }
+  (l.overrides||[]).forEach(function(ds){if(ds>=fs&&ds<=ts&&ge(ds)&&!reg[ds]&&mark(l.id,ds)!=='missed')n++;});
+  return n;
+}
+function fromFor(l,fp){var from=l.startDate||fp||shift30();var b=bf();if(b&&from<b)from=b;return from;}
+function balanceAtC(s,id,ds){
+  var paid=paidUpTo(s,id,ds),to=fromISO(ds),fp=firstPayC(s,id),spent=0;
+  s.lessons.filter(function(l){return l.studentId===id&&!l.archived}).forEach(function(l){
+    var from=fromFor(l,fp);if(from>ds)return;
+    spent+=countOccC(l,fromISO(from),to);
+  });
+  return paid-spent;
+}
+function countLessonsMonthC(s,id,y,m){
+  var n=0,d=new Date(y,m,1),last=new Date(y,m+1,0);
+  while(d<=last){
+    var ds=iso(d);
+    for(var i=0;i<s.lessons.length;i++){
+      var l=s.lessons[i];
+      if(l.studentId!==id||l.archived)continue;
+      var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+      if(isReg||(l.overrides||[]).includes(ds)){n++;break;}
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return n;
+}
+function toPayInfoC(s,id,y,m){
+  var sched=countLessonsMonthC(s,id,y,m);
+  var endPrev=iso(new Date(y,m,0));
+  var credit=balanceAtC(s,id,endPrev);
+  var paidM=paidInMonthC(s,id,y,m);
+  var paidPrev=paidUpTo(s,id,endPrev);
+  return{sched:sched,credit:credit,paidM:paidM,toPay:Math.max(0,sched-credit-paidM),paidPrev:paidPrev,spentPrev:paidPrev-credit};
+}
+window.toPayInfoC=toPayInfoC;
+
+/* баланс и чипы считают только от даты начала учёта */
+window.studentBalance=function(id){return balanceAtC(st(),id,iso(new Date()));};
+window.chip=function(l,ds){
+  var s=st(),stu=null;
+  for(var i=0;i<s.students.length;i++)if(s.students[i].id===l.studentId)stu=s.students[i];
+  var bal=stu?balanceAtC(s,stu.id,ds):0;
+  var mk=mark(l.id,ds);
+  var ico=mk==='done'?'✅ ':mk==='missed'?'❌ ':'';
+  var grace=isGrace();
+  var payCls,payTxt,ring=false;
+  if(mk==='missed'){payCls='no';payTxt='🔄 перенос (оплачен, не проведён)';}
+  else if(bal>0){payCls='ok';payTxt='✓ Оплачено · ост. '+bal;}
+  else if(bal===0){payCls='no';payTxt='⚡ последний оплаченный';}
+  else{payCls='no';ring=!grace;payTxt=grace?'⏳ Ждёт оплаты до 10 числа':'⚠ Нужна оплата к '+fmtS(fromISO(ds));}
+  var hw=s.hwMarks&&s.hwMarks[l.id]&&s.hwMarks[l.id][ds];
+  var hwIco=hw==='full'?'📝✅':hw==='part'?'📝⚠️':hw==='none'?'📝❌':'';
+  var html='<div class="chip '+(mk||'')+(ring?' unpaid':'')+'" draggable="true"'+
+    ' ondragstart="dragStart(event,'+l.id+',\''+ds+'\')"'+
+    ' onclick="openCtx(event,'+l.id+',\''+ds+'\')" oncontextmenu="openCtx(event,'+l.id+',\''+ds+'\');return false"'+
+    (stu?' onmouseenter="showTip(event,\''+stu.id+'\')" onmousemove="moveTip(event)" onmouseleave="hideTip()"':'')+
+    ' style="border-left-color:'+(stu?stu.color:'#8b7cf8')+'">'+
+    '<div class="chip-time">'+ico+l.start+'–'+l.end+'</div>'+
+    '<div class="chip-name">'+(stu?(stu.emoji?stu.emoji+' ':'')+esc(stu.name):esc(l.studentId))+'</div>'+
+    (hwIco?'<div class="chip-hw">'+hwIco+'</div>':'')+
+    '<div class="chip-pay '+payCls+'">'+payTxt+'</div></div>';
+  if(l.oneOff)html=html.replace('<div class="chip-time">','<div class="chip-time">🎯 ');
+  return html;
+};
+document.querySelectorAll('#ctx button').forEach(function(b){
+  if(b.textContent.indexOf('❌')===0)b.textContent='❌ Отменён (оплачен, уйдёт в перенос)';
+});
+
+/* дата начала учёта */
+var secPay=document.getElementById('sec-pay');
+if(secPay&&!document.getElementById('bfBox')){
+  var bd=document.createElement('div');bd.id='bfBox';
+  bd.innerHTML='<div class="item" style="cursor:default;padding:18px 20px;margin-bottom:14px"><b>⚙️ Дата начала учёта</b>'+
+   '<div class="muted" style="margin:6px 0 10px;font-size:.9rem">Баланс, переносы и «к оплате» считаются с этой даты. Более старая история (месяцы, которые вы считали вручную) не участвует. Доходы в статистике остаются за все месяцы.</div>'+
+   '<input type="date" id="bfDate" style="max-width:230px;display:inline-block"> '+
+   '<button class="btn primary sm" id="bfSave">Сохранить</button> '+
+   '<button class="btn ghost sm" id="bfClear">Сбросить</button></div>';
+  var pc=document.getElementById('payChecklist')||secPay.querySelector('.sec-head');
+  pc.parentNode.insertBefore(bd,pc);
+  document.getElementById('bfSave').onclick=function(){
+    st().settings=st().settings||{};
+    st().settings.balanceFrom=document.getElementById('bfDate').value||'';
+    save();renderAll();toast('⚙️ Дата начала учёта сохранена');
+  };
+  document.getElementById('bfClear').onclick=function(){
+    st().settings.balanceFrom='';save();renderAll();toast('⚙️ Сброс: учёт с самого начала');
+  };
+}
+
+/* строка переноса + кнопка оплаты в календаре */
+function syncSent(){
+  var b=document.getElementById('invSentBtn');if(!b)return;
+  var id=document.getElementById('invStudent').value;
+  var mo=ymParse(document.getElementById('invMonth').textContent);
+  if(mo.m<0||!mo.y){b.style.display='none';return;}
+  b.style.display='';
+  var e=(st().payTrack||{})[id+'|'+ymOf(mo.y,mo.m)];
+  if(e&&e.paid){b.textContent='✅ Оплата получена '+fmtS(fromISO(e.paid));b.disabled=true;}
+  else if(e&&e.sent){b.textContent='📮 Отправлено '+fmtS(fromISO(e.sent))+' — жду (нажмите, чтобы снять)';b.disabled=false;}
+  else{b.textContent='📮 Отправлено — жду оплату';b.disabled=false;}
+}
+window.updateCreditLine=function(){
+  var el=document.getElementById('invCreditLine');
+  if(!el){
+    el=document.createElement('div');el.id='invCreditLine';
+    el.style.cssText='margin-top:10px;font-weight:700;font-size:.95rem;line-height:1.7';
+    var cnt=document.getElementById('invCount');
+    cnt.parentNode.insertBefore(el,cnt.nextSibling);
+  }
+  var s=st();
+  var id=document.getElementById('invStudent').value;
+  var mo=ymParse(document.getElementById('invMonth').textContent);
+  if(mo.m<0||!mo.y)return;
+  var info=toPayInfoC(s,id,mo.y,mo.m);
+  window.__invToPay=info.toPay;
+  var lines=[];
+  if(info.credit>0)lines.push('<span style="color:var(--ok)">🔄 Остаток оплаченных уроков с прошлого месяца: +'+info.credit+'</span>');
+  if(info.credit<0)lines.push('<span style="color:var(--warn)">⚠️ Долг с прошлого месяца: '+(-info.credit)+' урок</span>');
+  if(info.paidM>0)lines.push('<span style="color:var(--ok)">💳 Оплачено в этом месяце: '+info.paidM+' уроков</span>');
+  lines.push('<span class="muted" style="font-weight:600;font-size:.83rem">на '+fmtS(new Date(mo.y,mo.m,0))+': оплачено '+info.paidPrev+', проведено '+info.spentPrev+'</span>');
+  el.innerHTML=lines.join('<br>');
+  var price=+document.getElementById('invPrice').value||0;
+  var total=document.getElementById('invTotal');
+  if(info.toPay<=0){total.textContent='🎉 Месяц уже оплачен полностью';total.style.color='var(--ok)';}
+  else{total.textContent='К оплате: '+info.toPay+' уроков × '+price+' ₽ = '+money(info.toPay*price);total.style.color='';}
+  var btn=document.getElementById('invPayBtn');
+  if(btn)btn.textContent=info.toPay<=0?'✅ Месяц оплачен':'💳 Оплатить за этот месяц ('+info.toPay+' уроков)';
+  syncSent();
+};
+var ipb=document.getElementById('invPayBtn');
+if(ipb){
+  var ipb2=ipb.cloneNode(true);
+  ipb.parentNode.replaceChild(ipb2,ipb);
+  ipb2.id='invPayBtn';
+  ipb2.addEventListener('click',function(){
+    try{
+      var s=st();
+      var id=document.getElementById('invStudent').value;
+      var mo=ymParse(document.getElementById('invMonth').textContent);
+      if(mo.m<0||!mo.y)return;
+      var ym=ymOf(mo.y,mo.m);
+      var info=toPayInfoC(s,id,mo.y,mo.m);
+      var price=+document.getElementById('invPrice').value||priceOf(s,id);
+      if(info.toPay<=0){toast('🎉 Месяц уже оплачен полностью');return;}
+      if(!price){toast('⚠️ Укажите стоимость занятия');return;}
+      if(!confirm('Зафиксировать оплату за '+MONTHS[mo.m]+' '+mo.y+':\nк оплате '+info.toPay+' уроков × '+price+' ₽ = '+money(info.toPay*price)+'?'))return;
+      s.payments.push({id:Date.now(),studentId:id,count:info.toPay,price:price,date:iso(new Date())});
+      var t=s.payTrack=s.payTrack||{};t[id+'|'+ym]=t[id+'|'+ym]||{};
+      if(!t[id+'|'+ym].sent)t[id+'|'+ym].sent=iso(new Date());
+      t[id+'|'+ym].paid=iso(new Date());
+      save();renderAll();
+      if(window.invShift)window.invShift(0);
+      toast('💳 Оплата получена: '+money(info.toPay*price)+' 🎉');
+    }catch(e){toast('Ошибка: '+e.message);}
+  });
+}
+
+/* чек-лист */
+window.renderChecklist=function(){
+  var box=document.getElementById('payChecklist');if(!box)return;
+  var bfi=document.getElementById('bfDate');if(bfi)bfi.value=bf();
+  var s=st();s.payTrack=s.payTrack||{};
+  var waiting=[],paidL=[];
+  Object.keys(s.payTrack).forEach(function(k){
+    var e=s.payTrack[k],p=k.split('|'),id=p[0],ym=p[1];
+    var stu=null;for(var i=0;i<s.students.length;i++)if(s.students[i].id===id)stu=s.students[i];
+    if(!stu)return;
+    var info=toPayInfoC(s,id,+ym.split('-')[0],+ym.split('-')[1]-1);
+    var row={id:id,ym:ym,stu:stu,e:e,info:info,price:priceOf(s,id)};
+    if(e.paid)paidL.push(row);else if(e.sent)waiting.push(row);
+  });
+  waiting.sort(function(a,b){return (a.e.sent||'').localeCompare(b.e.sent||'')});
+  paidL.sort(function(a,b){return (b.e.paid||'').localeCompare(a.e.paid||'')});
+  var html='<div class="sec-head" style="margin-top:0;margin-bottom:14px"><h2>📋 Чек-лист: отправила календарь</h2></div>';
+  if(!waiting.length&&!paidL.length){
+    html+='<div class="item" style="cursor:default;margin-bottom:18px"><div class="muted">Пока пусто. Откройте «📮 Календарь для оплаты» у ученика и нажмите «📮 Отправлено — жду оплату».</div></div>';
+  }
+  if(waiting.length){
+    html+='<div class="item" style="cursor:default;margin-bottom:14px">'+waiting.map(function(r){
+      var sum=r.info.toPay*r.price;
+      return '<div class="rowline"><span>'+(r.stu.emoji||'')+' '+esc(r.stu.name)+' <span class="muted">· '+ymLabel(r.ym)+' · отправлено '+fmtS(fromISO(r.e.sent))+'</span> '+
+        (r.info.toPay>0?'<b style="color:var(--warn)">'+money(sum)+'</b>':'<b style="color:var(--ok)">уже оплачено</b>')+'</span>'+
+        '<span style="display:flex;gap:6px">'+
+        (r.info.toPay>0?'<button class="btn primary sm" data-payid="'+r.id+'" data-payym="'+r.ym+'">💳 Оплачено</button>':'')+
+        '<button class="btn ghost sm" data-rmid="'+r.id+'" data-rmym="'+r.ym+'">✖</button></span></div>';
+    }).join('')+'</div>';
+  }
+  if(paidL.length){
+    html+='<div class="muted" style="font-weight:800;margin:6px 0">✅ Оплачено:</div><div class="item" style="cursor:default;margin-bottom:18px">'+paidL.slice(0,10).map(function(r){
+      return '<div class="rowline"><span>'+(r.stu.emoji||'')+' '+esc(r.stu.name)+' <span class="muted">· '+ymLabel(r.ym)+' · получено '+fmtS(fromISO(r.e.paid))+'</span></span>'+
+        '<button class="btn ghost sm" data-rmid="'+r.id+'" data-rmym="'+r.ym+'">✖</button></div>';
+    }).join('')+'</div>';
+  }
+  box.innerHTML=html;
+};
+window.payFor=function(id,ym){
+  try{
+    var s=st();
+    var y=+ym.split('-')[0],m=+ym.split('-')[1]-1;
+    var info=toPayInfoC(s,id,y,m);
+    var price=priceOf(s,id);
+    var t=s.payTrack=s.payTrack||{};var e=t[id+'|'+ym]||{};
+    if(info.toPay<=0){
+      t[id+'|'+ym]={sent:e.sent||iso(new Date()),paid:iso(new Date())};
+      save();renderAll();toast('✅ Отмечено как оплачено');return;
+    }
+    if(!price){toast('⚠️ Нет цены: укажите её в карточке ученика');return;}
+    if(!confirm('Зафиксировать оплату за '+ymLabel(ym)+':\n'+info.toPay+' уроков × '+price+' ₽ = '+money(info.toPay*price)+'?'))return;
+    s.payments.push({id:Date.now(),studentId:id,count:info.toPay,price:price,date:iso(new Date())});
+    t[id+'|'+ym]={sent:e.sent||iso(new Date()),paid:iso(new Date())};
+    save();renderAll();toast('💳 Оплата получена: '+money(info.toPay*price)+' 🎉');
+  }catch(e){toast('Ошибка: '+e.message);}
+};
+
+/* диагностика */
+function openDiag(){
+  try{
+    var s=st();
+    var id=document.getElementById('invStudent').value;
+    var mo=ymParse(document.getElementById('invMonth').textContent);
+    if(mo.m<0||!mo.y)return;
+    var endPrev=iso(new Date(mo.y,mo.m,0));
+    var pays=s.payments.filter(function(p){return p.studentId===id&&ge(p.date)});
+    var paid=paidUpTo(s,id,endPrev);
+    var fp=firstPayC(s,id);
+    var lines=[];
+    lines.push('Дата начала учёта: '+(bf()||'не задана'));
+    lines.push('ОПЛАТЫ (учтённые): '+(pays.length?pays.map(function(p){return fmtS(fromISO(p.date))+' ×'+p.count}).join(', '):'нет'));
+    lines.push('Оплачено до '+fmtS(fromISO(endPrev))+': '+paid);
+    var spent=0;
+    s.lessons.filter(function(l){return l.studentId===id&&!l.archived}).forEach(function(l){
+      var from=fromFor(l,fp);if(from>endPrev)return;
+      var d=fromISO(from),dsList=[];
+      while(d<=fromISO(endPrev)){
+        var ds=iso(d);
+        if(ge(ds)){
+          var isReg=dayNum(d)+1===l.day&&(!l.startDate||ds>=l.startDate)&&(!l.endDate||ds<=l.endDate)&&!(l.exceptions||[]).includes(ds);
+          var over=(l.overrides||[]).indexOf(ds)>=0;
+          if((isReg||over)&&mark(l.id,ds)!=='missed')dsList.push(fmtS(d)+(l.oneOff?' (🎯)':(over&&!isReg?' (перенос)':'')));
+        }
+        d.setDate(d.getDate()+1);
+      }
+      spent+=dsList.length;
+      lines.push('Урок '+l.start+'–'+l.end+' ('+(l.oneOff?'🎯 разовый':'кажд. '+DOW[l.day-1])+', с '+from+'): '+(dsList.length?dsList.join(', '):'—'));
+    });
+    lines.push('Проведено до '+fmtS(fromISO(endPrev))+': '+spent);
+    lines.push('ОСТАТОК на конец месяца: '+paid+' − '+spent+' = '+(paid-spent));
+    if(!document.getElementById('mDiag')){
+      var w=document.createElement('div');
+      w.innerHTML='<div class="overlay" id="mDiag" onclick="if(event.target===this)closeModal(\'mDiag\')">'+
+        '<div class="modal" style="max-width:600px"><h3>🔎 Почему такая цифра</h3>'+
+        '<div id="diagBody" style="font-size:.9rem;line-height:1.8;white-space:pre-wrap;font-family:Menlo,Consolas,monospace;margin-top:12px"></div>'+
+        '<div class="modal-actions"><button class="btn ghost" onclick="closeModal(\'mDiag\')">Закрыть</button></div></div></div>';
+      document.body.appendChild(w);
+    }
+    document.getElementById('diagBody').textContent=lines.join('\n');
+    openModal('mDiag');
+  }catch(e){toast('Ошибка: '+e.message);}
+}
+window.openDiag=openDiag;
+var invModal=document.querySelector('#mInvoice .modal');
+if(invModal&&!document.getElementById('diagBtn')){
+  var b=document.createElement('button');
+  b.id='diagBtn';b.className='btn ghost sm';
+  b.style.cssText='width:100%;margin-top:8px';
+  b.textContent='🔎 Почему такая цифра? (проверка)';
+  b.onclick=openDiag;
+  invModal.appendChild(b);
+}
+try{renderAll();}catch(e){}
+})();
+</script>
   
 </body>
 </html>
